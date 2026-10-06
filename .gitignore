@@ -1,0 +1,11 @@
+node_modules
+dist
+coverage
+.playwright-cli
+
+# Material de referencia personal, ajeno al proyecto.
+docs/
+
+*.local
+.DS_Store
+.vitest/

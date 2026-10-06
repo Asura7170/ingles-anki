@@ -1,0 +1,50 @@
+{
+  "name": "ingles-anki",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vp dev",
+    "build": "tsc --noEmit && vp build",
+    "preview": "vp preview",
+    "test": "vp test --run",
+    "test:watch": "vp test",
+    "coverage": "vp test --run --coverage",
+    "check": "vp check && tsc --noEmit",
+    "fix": "vp check --fix",
+    "verify": "pnpm check && pnpm coverage && pnpm build"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "^3.14.13",
+    "compromise": "^14.18.0",
+    "dexie": "^4.4.6",
+    "dexie-react-hooks": "^4.4.0",
+    "fflate": "^0.8.3",
+    "fzstd": "^0.1.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "sql.js": "^1.14.2",
+    "ts-fsrs": "^5.4.2",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/sql.js": "^1.4.9",
+    "@vitejs/plugin-react": "^5.1.0",
+    "@vitest/coverage-v8": "catalog:",
+    "fake-indexeddb": "^6.2.5",
+    "typescript": "^5.9.0",
+    "vite": "catalog:",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.9.1",
+      "onFail": "download"
+    }
+  }
+}

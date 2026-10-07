@@ -99,65 +99,65 @@ export async function runDelete<T>(
 export async function deleteDeck(
   deck: Deck,
 ): Promise<{ words: number; kept: number; texts: number; shared: number }> {
-  const ids = await deckNodeIds(deck);
-  const sources = await db.sources.toArray();
+  const res = await db.transaction("rw", db.tables, async () => {
+    const ids = await deckNodeIds(deck);
+    const sources = await db.sources.toArray();
 
-  // Transcripciones que otro mazo todavía reclama — y cuántos mazos las
-  // reclaman. Hace falta la intersección: un mazo importado no tiene
-  // `sourceTextIds`, así que con la unión a secas cualquier mazo generado en la
-  // biblioteca lo hacía pasar por compartido, y el aviso nombraba una
-  // transcripción que no tenía. Y `holders` son mazos, no transcripciones: el
-  // aviso dice "la comparten N mazos".
-  const mineTexts = deck.sourceTextIds ?? [];
-  const holders = new Set<number>();
-  const sharedWithMe = new Set<number>();
-  for (const d of await db.decks.toArray()) {
-    if (d.id === deck.id) continue;
-    // Sin filtrar por `kind`: `belongsToDeck` trata cualquier mazo no importado
-    // por sus `sourceTextIds`, así que un `kind:"filter"` también contaría.
-    const overlap = (d.sourceTextIds ?? []).filter((t) => mineTexts.includes(t));
-    if (!overlap.length) continue;
-    holders.add(d.id!);
-    for (const t of overlap) sharedWithMe.add(t);
-  }
-  const ownTexts = new Set(mineTexts.filter((t) => !sharedWithMe.has(t)));
-
-  const mine = new Set(
-    sources
-      .filter((s) => {
-        if (!belongsToDeck(s, deck)) return false;
-        // Fila de un mazo importado: nuestra sin más, ya que `belongsToDeck`
-        // comparó `deckId`. El guard de `deckId` que hace `belongsToDeck`
-        // (un mazo no importado no la reclama) es lo que impide que un mazo
-        // generado se lleve las palabras de un importado.
-        if (s.deckId !== undefined) return true;
-        // Fila de transcripción: sólo si es nuestra en exclusiva.
-        //
-        // Y aquí está la costura crítica: si la transcripción se comparte,
-        // `mine` tiene que quedar VACÍA para ese texto. No basta con saltarse
-        // el `delete` más abajo, porque `mine` también decide qué palabras
-        // quedan huérfanas — y un `mine` poblado volvería huérfanas las del
-        // otro mazo, que es justo lo que hay que evitar.
-        return ownTexts.has(s.sourceTextId ?? -1);
-      })
-      .flatMap((s) => (s.id === undefined ? [] : [s.id])),
-  );
-
-  // Una palabra sobrevive si le queda algún origen que no era de este mazo.
-  const stillLinked = new Set<string>();
-  for (const s of sources) if (!mine.has(s.id!)) stillLinked.add(String(s.nodeId));
-  const orphans = ids.filter((id) => !stillLinked.has(String(id)));
-
-  const doomed: number[] = [];
-  let kept = 0;
-  if (orphans.length) {
-    for (const n of await db.nodes.where("id").anyOf(orphans).toArray()) {
-      if (n.known) kept++;
-      else doomed.push(n.id!);
+    // Transcripciones que otro mazo todavía reclama — y cuántos mazos las
+    // reclaman. Hace falta la intersección: un mazo importado no tiene
+    // `sourceTextIds`, así que con la unión a secas cualquier mazo generado en la
+    // biblioteca lo hacía pasar por compartido, y el aviso nombraba una
+    // transcripción que no tenía. Y `holders` son mazos, no transcripciones: el
+    // aviso dice "la comparten N mazos".
+    const mineTexts = deck.sourceTextIds ?? [];
+    const holders = new Set<number>();
+    const sharedWithMe = new Set<number>();
+    for (const d of await db.decks.toArray()) {
+      if (d.id === deck.id) continue;
+      // Sin filtrar por `kind`: `belongsToDeck` trata cualquier mazo no importado
+      // por sus `sourceTextIds`, así que un `kind:"filter"` también contaría.
+      const overlap = (d.sourceTextIds ?? []).filter((t) => mineTexts.includes(t));
+      if (!overlap.length) continue;
+      holders.add(d.id!);
+      for (const t of overlap) sharedWithMe.add(t);
     }
-  }
+    const ownTexts = new Set(mineTexts.filter((t) => !sharedWithMe.has(t)));
 
-  await db.transaction("rw", db.tables, async () => {
+    const mine = new Set(
+      sources
+        .filter((s) => {
+          if (!belongsToDeck(s, deck)) return false;
+          // Fila de un mazo importado: nuestra sin más, ya que `belongsToDeck`
+          // comparó `deckId`. El guard de `deckId` que hace `belongsToDeck`
+          // (un mazo no importado no la reclama) es lo que impide que un mazo
+          // generado se lleve las palabras de un importado.
+          if (s.deckId !== undefined) return true;
+          // Fila de transcripción: sólo si es nuestra en exclusiva.
+          //
+          // Y aquí está la costura crítica: si la transcripción se comparte,
+          // `mine` tiene que quedar VACÍA para ese texto. No basta con saltarse
+          // el `delete` más abajo, porque `mine` también decide qué palabras
+          // quedan huérfanas — y un `mine` poblado volvería huérfanas las del
+          // otro mazo, que es justo lo que hay que evitar.
+          return ownTexts.has(s.sourceTextId ?? -1);
+        })
+        .flatMap((s) => (s.id === undefined ? [] : [s.id])),
+    );
+
+    // Una palabra sobrevive si le queda algún origen que no era de este mazo.
+    const stillLinked = new Set<string>();
+    for (const s of sources) if (!mine.has(s.id!)) stillLinked.add(String(s.nodeId));
+    const orphans = ids.filter((id) => !stillLinked.has(String(id)));
+
+    const doomed: number[] = [];
+    let kept = 0;
+    if (orphans.length) {
+      for (const n of await db.nodes.where("id").anyOf(orphans).toArray()) {
+        if (n.known) kept++;
+        else doomed.push(n.id!);
+      }
+    }
+
     await db.sources
       .where("id")
       .anyOf([...mine])
@@ -165,10 +165,10 @@ export async function deleteDeck(
     await db.decks.delete(deck.id!);
     await cascade(doomed);
     await db.sourceTexts.bulkDelete([...ownTexts]);
+    return { words: doomed.length, kept, texts: ownTexts.size, shared: holders.size };
   });
   scheduleAutoSave();
-
-  return { words: doomed.length, kept, texts: ownTexts.size, shared: holders.size };
+  return res;
 }
 
 /**
@@ -181,16 +181,23 @@ export async function deleteDeck(
  * distinto de "sin origen" pero no es pérdida de datos.
  */
 export async function purgeOrphanTexts(): Promise<number> {
-  const referenced = new Set<number>();
-  for (const d of await db.decks.toArray()) {
-    for (const t of d.sourceTextIds ?? []) referenced.add(t);
-  }
-  const orphans = (await db.sourceTexts.toArray()).filter((t) => !referenced.has(t.id!));
-  if (!orphans.length) return 0;
-
-  await db.transaction("rw", db.sourceTexts, () =>
-    db.sourceTexts.bulkDelete(orphans.map((t) => t.id!)),
-  );
-  scheduleAutoSave();
-  return orphans.length;
+  // Las dos lecturas y el borrado en la misma transacción, y con `decks` dentro
+  // del ámbito. Leer fuera convertía cada instantánea en una respuesta
+  // distinta: una transcripción pegada que confirmase su mazo entre ambas
+  // lecturas se borraba igualmente, y es texto que escribió el usuario sin copia
+  // en ninguna parte. Mismo patrón que `deleteDeck`, misma razón.
+  const n = await db.transaction("rw", db.decks, db.sourceTexts, async () => {
+    const referenced = new Set<number>();
+    for (const d of await db.decks.toArray()) {
+      for (const t of d.sourceTextIds ?? []) referenced.add(t);
+    }
+    const orphans = (await db.sourceTexts.toArray()).filter((t) => !referenced.has(t.id!));
+    if (!orphans.length) return 0;
+    await db.sourceTexts.bulkDelete(orphans.map((t) => t.id!));
+    return orphans.length;
+  });
+  // Sólo si hubo algo que borrar: el plan anterior salía antes por el `return 0`
+  // y no programaba una copia de seguridad entera sobre una operación vacía.
+  if (n) scheduleAutoSave();
+  return n;
 }

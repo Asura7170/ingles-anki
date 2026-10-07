@@ -60,6 +60,13 @@ async function markDue(count: number): Promise<void> {
   }
 }
 
+/**
+ * El botón de confirmación destructivo. Antes decía siempre "¿Seguro? Borrar";
+ * ahora incluye cuántas palabras se van, así que se busca por patrón y el
+ * recuento se comprueba en sus propios tests.
+ */
+const CONFIRM = /^\u00bfSeguro\?/;
+
 function setNewLimit(n: number): void {
   useApp.setState((s) => ({ prefs: { ...s.prefs, dailyNewLimit: n } }));
 }
@@ -244,14 +251,49 @@ describe("borrar", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Borrar" }));
     // Primeiro click: sólo cambia el botón. La base está intacta.
-    expect(screen.getByRole("button", { name: "¿Seguro? Borrar" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: CONFIRM })).toBeTruthy();
     expect(await db.decks.get(id)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar" }));
+    fireEvent.click(screen.getByRole("button", { name: CONFIRM }));
     // El botón se esconde al pulsar; el borrado real termina después, en la
     // transacción. Por eso la aserción va sobre la base, no sobre la UI.
     await waitFor(async () => expect(await db.decks.get(id)).toBeUndefined());
-    expect(screen.queryByRole("button", { name: "¿Seguro? Borrar" })).toBeNull();
+    expect(screen.queryByRole("button", { name: CONFIRM })).toBeNull();
+  });
+
+  it("la confirmación dice cuántas palabras se van", async () => {
+    // Sin el número, "Borrar" sobre un mazo de 2.000 palabras es un borrado a
+    // ciegas: no hay forma de saber qué está en juego antes de confirmar.
+    await seedDeck("A", ["a1", "a2", "a3"]);
+    render(<Decks />);
+
+    // `doomed` sale de las estadísticas, que llegan por `useLiveQuery`. Antes de
+    // que carguen el botón dice "¿Seguro? Borrar mazo" sin número, así que sin
+    // esta espera el test probaría el estado de carga y no el de borrado.
+    await screen.findByText(/3 palabras/);
+    fireEvent.click(screen.getByRole("button", { name: "Borrar" }));
+    expect(screen.getByRole("button", { name: "¿Seguro? Borrar mazo y 3 palabras" })).toBeTruthy();
+  });
+
+  it("no cuenta como eliminables las palabras marcadas como conocidas", async () => {
+    await seedDeck("A", ["a1", "a2", "a3"]);
+    await db.nodes.update(1, { known: 1 });
+    render(<Decks />);
+
+    await screen.findByText(/3 palabras/);
+    fireEvent.click(screen.getByRole("button", { name: "Borrar" }));
+    // Es un máximo, no una promesa: las compartidas con otro mazo sobreviven.
+    expect(screen.getByRole("button", { name: "¿Seguro? Borrar mazo y 2 palabras" })).toBeTruthy();
+  });
+
+  it("sin palabras que borrar, la confirmación no inventa un número", async () => {
+    const id = (await db.decks.add({ name: "Vacío", kind: "import", createdAt: NOW }))!;
+    render(<Decks />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Borrar" }));
+    expect(screen.getByRole("button", { name: "¿Seguro? Borrar mazo" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar mazo" }));
+    await waitFor(async () => expect(await db.decks.get(id)).toBeUndefined());
   });
 
   it("se lleva las palabras que le quedaban huérfanas", async () => {
@@ -259,7 +301,7 @@ describe("borrar", () => {
     render(<Decks />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Borrar" }));
-    fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar" }));
+    fireEvent.click(screen.getByRole("button", { name: CONFIRM }));
 
     await waitFor(async () => expect(await db.decks.count()).toBe(0));
     // Sin `sources` no hay mazo al que pertenecer, y una palabra sin mazo no se
@@ -275,7 +317,7 @@ describe("borrar", () => {
     render(<Decks />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Borrar" }));
-    fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar" }));
+    fireEvent.click(screen.getByRole("button", { name: CONFIRM }));
 
     await waitFor(async () => expect(await db.decks.count()).toBe(0));
     // La marca es un hecho sobre la persona, no sobre el import: sobrevive al mazo.
@@ -290,7 +332,7 @@ describe("borrar", () => {
     render(<Decks />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Borrar" }));
-    fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar" }));
+    fireEvent.click(screen.getByRole("button", { name: CONFIRM }));
 
     // Sin esto, `sources` acumularía referencias a un mazo inexistente.
     await waitFor(async () => expect(await db.sources.count()).toBe(0));
@@ -302,7 +344,7 @@ describe("borrar", () => {
     render(<Decks />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Borrar" }));
-    fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar" }));
+    fireEvent.click(screen.getByRole("button", { name: CONFIRM }));
 
     // El aviso sale al terminar la transacción, no al pulsar.
     await waitFor(() =>
@@ -321,9 +363,7 @@ describe("borrar", () => {
     // Con el orden `createdAt` desc, "B" (creado después) es el primero.
     const newest = (await screen.findAllByRole("button", { name: "Borrar" }))[0]!;
     fireEvent.click(newest);
-    fireEvent.click(
-      within(newest.closest(".panel")!).getByRole("button", { name: "¿Seguro? Borrar" }),
-    );
+    fireEvent.click(within(newest.closest(".panel")!).getByRole("button", { name: CONFIRM }));
 
     await waitFor(async () => expect(await db.decks.count()).toBe(1));
     expect((await db.decks.get(a))!.name).toBe("A");
@@ -334,10 +374,57 @@ describe("borrar", () => {
     render(<Decks />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Borrar" }));
-    fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar" }));
+    fireEvent.click(screen.getByRole("button", { name: CONFIRM }));
 
     await waitFor(() => expect(useApp.getState().toast).toContain("Mazo «A» borrado."));
     expect(useApp.getState().toast).not.toMatch(/siguen en la biblioteca/);
+  });
+});
+
+describe("renombrar sin colisiones", () => {
+  it("un nombre ya usado no se acepta y el campo sigue abierto", async () => {
+    await seedDeck("A", ["run"]);
+    await seedDeck("B", ["study"]);
+    render(<Decks />);
+
+    // Dos mazos, dos botones "Renombrar": hay que elegir el de A.
+    fireEvent.click((await screen.findAllByRole("button", { name: "Renombrar" }))[0]!);
+    const field = screen.getByLabelText("Nuevo nombre para A");
+    fireEvent.change(field, { target: { value: "B" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+
+    // `decks.name` está indexado pero no es único. Dos mazos con el mismo
+    // nombre son indistinguibles en la lista y en cualquier filtro por texto.
+    await waitFor(() => expect(useApp.getState().toast).toBe("Ya existe un mazo llamado «B»."));
+    expect(screen.getByLabelText("Nuevo nombre para A")).toBeTruthy();
+    expect(await db.decks.where("name").equals("A").count()).toBe(1);
+    expect(await db.decks.where("name").equals("B").count()).toBe(1);
+  });
+
+  it("no colisiona consigo mismo", async () => {
+    const id = await seedDeck("A", ["run"]);
+    render(<Decks />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Renombrar" }));
+    const field = screen.getByLabelText("Nuevo nombre para A");
+    fireEvent.change(field, { target: { value: "  A  " } });
+    fireEvent.keyDown(field, { key: "Enter" });
+
+    await waitFor(() => expect(screen.queryByLabelText("Nuevo nombre para A")).toBeNull());
+    expect((await db.decks.get(id))!.name).toBe("A");
+  });
+
+  it("distingue mayúsculas", async () => {
+    const id = await seedDeck("Inglés", ["run"]);
+    render(<Decks />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Renombrar" }));
+    const field = screen.getByLabelText("Nuevo nombre para Inglés");
+    fireEvent.change(field, { target: { value: "inglés" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+
+    await waitFor(() => expect(screen.queryByLabelText(/Nuevo nombre/)).toBeNull());
+    expect((await db.decks.get(id))!.name).toBe("inglés");
   });
 });
 

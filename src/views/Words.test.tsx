@@ -299,6 +299,107 @@ describe("borrar una palabra desde el detalle", () => {
   });
 });
 
+describe("el recuento de la confirmación es el que se borra", () => {
+  it("filtrar después de seleccionar NO borra lo que el recuento no cuenta", async () => {
+    // Éste era un bug real: `removeSelected` usaba `selected` entero mientras el
+    // botón contaba `shownSelected`. Con run+study seleccionadas, filtro a "ru",
+    // el botón decía "Borrar 1" y se iban las dos.
+    await seed(["run", "study", "child"]);
+    await renderList();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: lemmaOf("run") }));
+    fireEvent.click(screen.getByRole("checkbox", { name: lemmaOf("study") }));
+    expect(await screen.findByText("2 seleccionadas")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Buscar"), { target: { value: "ru" } });
+    await waitFor(() => expect(count()).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: /Borrar seleccionadas/ }));
+    expect(screen.getByRole("button", { name: "¿Seguro? Borrar 1" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar 1" }));
+
+    // "study" quedó fuera de pantalla y fuera del recuento, así que sobrevive.
+    await waitFor(async () => expect(await db.nodes.count()).toBe(2));
+    expect(await db.nodes.where("lemma").equals("study").first()).toBeTruthy();
+  });
+
+  it("sin selección fuera de pantalla, seleccionar todas sí borra todo lo visible", async () => {
+    await seed(["run", "study"]);
+    await renderList();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: ALL }));
+    fireEvent.click(await screen.findByRole("button", { name: /Borrar seleccionadas/ }));
+    fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar 2" }));
+
+    await waitFor(async () => expect(await db.nodes.count()).toBe(0));
+  });
+});
+
+describe("la columna Origen", () => {
+  it("muestra el mazo del que viene", async () => {
+    const deckId = (await db.decks.add({
+      name: "Verbos irregulares",
+      kind: "import",
+      createdAt: NOW,
+    }))!;
+    await ingest([item("run")], { kind: "apkg", priority: 30, deckId, noteId: 1 });
+    await renderList();
+
+    const cell = document.querySelectorAll(".trow:not(.thead) .tag")[0]!;
+    expect(cell.textContent).toBe("Verbos irregulares");
+  });
+
+  it("una palabra de una transcripción muestra el título", async () => {
+    const sourceTextId = (await db.sourceTexts.add({
+      kind: "text",
+      title: "Ch. 1",
+      body: "run study",
+      importedAt: NOW,
+    }))!;
+    await ingest([item("run")], { kind: "text", priority: 20, sourceTextId });
+    await renderList();
+
+    // `origin` se recalcula cuando llegan `sourceTexts`, que es un `useLiveQuery`
+    // aparte de `nodes`: hay filas antes de que el título esté disponible.
+    await waitFor(() =>
+      expect(document.querySelectorAll(".trow:not(.thead) .tag")[0]!.textContent).toBe("Ch. 1"),
+    );
+  });
+
+  it("sin ninguna fuente dice «sin mazo» en vez de mentir", async () => {
+    // Antes esta columna pintaba el *tipo* de palabra bajo la etiqueta "Origen",
+    // así que una palabra superviviente a un borrado de mazo era indistinguible
+    // de una normal. "sin mazo" es justo el estado que hay que poder ver.
+    await seed(["run"]);
+    await renderList();
+
+    expect(document.querySelectorAll(".trow:not(.thead) .tag")[0]!.textContent).toBe("sin mazo");
+  });
+
+  it("una palabra en dos mazos los cuenta", async () => {
+    const a = (await db.decks.add({ name: "A", kind: "import", createdAt: NOW }))!;
+    const b = (await db.decks.add({ name: "B", kind: "import", createdAt: NOW + 1 }))!;
+    await ingest([item("run")], { kind: "apkg", priority: 30, deckId: a, noteId: 1 });
+    await ingest([item("run")], { kind: "apkg", priority: 30, deckId: b, noteId: 1 });
+    await renderList();
+
+    expect(document.querySelectorAll(".trow:not(.thead) .tag")[0]!.textContent).toBe("A +1");
+  });
+
+  it("el título completo está en el title por si se corta", async () => {
+    const deckId = (await db.decks.add({
+      name: "Un nombre de mazo bastante largo que se va a cortar",
+      kind: "import",
+      createdAt: NOW,
+    }))!;
+    await ingest([item("run")], { kind: "apkg", priority: 30, deckId, noteId: 1 });
+    await renderList();
+
+    const cell = document.querySelectorAll(".trow:not(.thead) .tag")[0]!;
+    expect(cell.getAttribute("title")).toContain("Un nombre de mazo bastante largo");
+  });
+});
+
 describe("la lista sigue funcionando", () => {
   it("la búsqueda no filtra por selección", async () => {
     await seed(["run", "study"]);

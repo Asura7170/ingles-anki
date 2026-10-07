@@ -14,12 +14,28 @@ import { belongsToDeck, deckNodeIds } from "./decks";
 import { scheduleAutoSave } from "./backup";
 
 /**
- * Borra palabras y todo lo que cuelga de ellas, en una transacción.
+ * Cascada de borrado de una lista de nodos. Asume que ya hay una transacción
+ * abierta: la comparten `deleteWords` y `deleteDeck` para que borrar un mazo sea
+ * atómico.
  *
  * `reviewLog` sí se borra. La doctrina de "es la bitácora, nunca se borra"
  * (`srs.ts`) protege el historial de una palabra que *sigue existiendo* —
  * `unmark --reset` la respeta. Aquí el nodo desaparece, así que sus entradas no
  * describirían a nadie y sólo crecerían el backup.
+ */
+async function cascade(ids: number[]): Promise<void> {
+  if (!ids.length) return;
+  await db.senses.where("nodeId").anyOf(ids).delete();
+  await db.sources.where("nodeId").anyOf(ids).delete();
+  await db.examples.where("nodeId").anyOf(ids).delete();
+  await db.relations.where("fromNodeId").anyOf(ids).delete();
+  await db.reviewLog.where("nodeId").anyOf(ids).delete();
+  await db.exposure.where("nodeId").anyOf(ids).delete();
+  await db.nodes.bulkDelete(ids);
+}
+
+/**
+ * Borra palabras y todo lo que cuelga de ellas, en una transacción.
  */
 export async function deleteWords(ids: number[]): Promise<number> {
   if (!ids.length) return 0;
@@ -27,15 +43,7 @@ export async function deleteWords(ids: number[]): Promise<number> {
   // sobrecarga con tipado llega a 5. Anidarlas no vale — Dexie exige que la
   // transacción hija esté dentro de las tablas de la padre
   // ("SubTransactionError: Table examples not included in parent transaction").
-  await db.transaction("rw", db.tables, async () => {
-    await db.senses.where("nodeId").anyOf(ids).delete();
-    await db.sources.where("nodeId").anyOf(ids).delete();
-    await db.examples.where("nodeId").anyOf(ids).delete();
-    await db.relations.where("fromNodeId").anyOf(ids).delete();
-    await db.reviewLog.where("nodeId").anyOf(ids).delete();
-    await db.exposure.where("nodeId").anyOf(ids).delete();
-    await db.nodes.bulkDelete(ids);
-  });
+  await db.transaction("rw", db.tables, () => cascade(ids));
   scheduleAutoSave();
   return ids.length;
 }
@@ -78,17 +86,18 @@ export async function deleteDeck(deck: Deck): Promise<{ words: number; kept: num
     }
   }
 
-  // El mazo y sus `sources` primero: es lo que deja huérfanas a las palabras, y
-  // leer `orphans` antes de este paso habría reliantado de un estado que aún no
-  // existe. `deleteWords` es idempotente sobre ids que ya no están.
-  await db.transaction("rw", db.decks, db.sources, async () => {
+  // TODO en una transacción. Con dos, un fallo entre medias dejaba el mazo
+  // borrado y las palabras huérfanas para siempre — el mismo bug que motivationsó
+  // este módulo, pero sólo bajo fallo, que es la forma que no se reproduce a
+  // mano.
+  await db.transaction("rw", db.tables, async () => {
     await db.sources
       .where("id")
       .anyOf([...mine])
       .delete();
     await db.decks.delete(deck.id!);
+    await cascade(doomed);
   });
-  await deleteWords(doomed);
   scheduleAutoSave();
 
   return { words: doomed.length, kept };

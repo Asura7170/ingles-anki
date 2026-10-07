@@ -1,9 +1,9 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { IDBFactory } from "fake-indexeddb";
-import { db } from "./db";
+import { db, type Deck } from "./db";
 import { ingest, markSourceKnown, type IngestItem } from "./ingest";
-import { buildQueue, deckNodeIds, deckStats, type StudyItem } from "./decks";
+import { allDeckStats, buildQueue, deckNodeIds, deckStats, type StudyItem } from "./decks";
 import { deleteDeck } from "./purge";
 import { review, retrievability, newCard } from "./srs";
 
@@ -94,7 +94,7 @@ describe("deckNodeIds", () => {
   });
 });
 
-describe("deckStats", () => {
+describe("allDeckStats", () => {
   it("cuenta known, learning, due y fresh", async () => {
     const deckId = await seedDeck("A", ["run", "study", "child"]);
 
@@ -121,6 +121,49 @@ describe("deckStats", () => {
       due: 0,
       fresh: 0,
     });
+  });
+
+  it("varios mazos de golpe, y una palabra compartida cuenta en los dos", async () => {
+    const a = await seedDeck("A", ["run"]);
+    const b = await seedDeck("B", ["run", "study"]);
+
+    const all = await allDeckStats([
+      { name: "A", kind: "import", createdAt: NOW, id: a },
+      { name: "B", kind: "import", createdAt: NOW, id: b },
+    ]);
+
+    // Ésta es la razón de no haber `break` en el bucle interno: "run" tiene dos
+    // filas en `sources` y pertenece a los dos mazos.
+    expect(all.get(a!)!.total).toBe(1);
+    expect(all.get(b!)!.total).toBe(2);
+  });
+
+  it("un mazo sin id no entra en el mapa", async () => {
+    const out = await allDeckStats([{ name: "S", kind: "import", createdAt: NOW }]);
+    expect(out.size).toBe(0);
+  });
+
+  it("lista vacía no lee la base", async () => {
+    expect((await allDeckStats([])).size).toBe(0);
+  });
+
+  it("un mazo generado cuenta por sourceTextId, no por deckId", async () => {
+    const sourceTextId = (await db.sourceTexts.add({
+      kind: "text",
+      title: "T",
+      body: "x",
+      importedAt: NOW,
+    }))!;
+    await ingest([item("run")], { kind: "text", priority: 20, sourceTextId });
+    const g: Deck = {
+      name: "G",
+      kind: "generated",
+      sourceTextIds: [sourceTextId],
+      createdAt: NOW,
+      id: 99,
+    };
+
+    expect((await allDeckStats([g])).get(99)!.total).toBe(1);
   });
 });
 

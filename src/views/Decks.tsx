@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, type Deck } from "../db";
-import { deckStats, type DeckStats } from "../decks";
+import { allDeckStats, type DeckStats } from "../decks";
 import { deleteDeck } from "../purge";
 import { useApp } from "../store";
 
@@ -14,6 +14,10 @@ export default function Decks() {
       const rows = await db.decks.toArray();
       return rows.sort((a, b) => b.createdAt - a.createdAt);
     }, []) ?? [];
+  // Una consulta para todas las tarjetas. Antes cada `DeckCard` tenía la suya, y
+  // `deckStats` terminaba en `db.sources.toArray()`: 20 mazos = 20 escaneos
+  // completos y 20 suscripciones vivas que se relanzaban en cada cambio.
+  const stats = useLiveQuery(() => allDeckStats(decks), [decks]);
   const startSession = useApp((s) => s.startSession);
   const busy = useApp((s) => s.busy);
   const [filter, setFilter] = useState("");
@@ -57,6 +61,7 @@ export default function Decks() {
                   <DeckCard
                     key={deck.id}
                     deck={deck}
+                    stats={deck.id === undefined ? undefined : stats?.get(deck.id)}
                     onStart={startSession}
                     disabled={Boolean(busy)}
                   />
@@ -72,14 +77,15 @@ export default function Decks() {
 
 function DeckCard({
   deck,
+  stats,
   onStart,
   disabled,
 }: {
   deck: Deck;
+  stats?: DeckStats;
   onStart: (deck: Deck) => void;
   disabled: boolean;
 }) {
-  const stats = useLiveQuery<DeckStats>(() => deckStats(deck), [deck.id, deck.name, deck.kind]);
   // La misma fuente que `startSession` pasa a `buildQueue`. Antes la tarjeta
   // contaba con `deck.dailyNewLimit` (que nadie rellenaba) y el store usaba
   // `prefs.dailyNewLimit`: el botón prometía una cola distinta de la que llegaba.
@@ -89,6 +95,10 @@ function DeckCard({
   const [confirming, setConfirming] = useState(false);
 
   const pending = (stats?.due ?? 0) + Math.min(stats?.fresh ?? 0, newLimit);
+  // Cota superior de lo que se va: las palabras sin marcar. Las compartidas con
+  // otro mazo sobreviven igual, así que el botón nunca promete más de lo que
+  // puede quitar — que es el peor error posible en un borrado.
+  const doomed = stats ? stats.total - stats.known : 0;
 
   return (
     <div className="panel">
@@ -123,7 +133,9 @@ function DeckCard({
                   void removeDeck(deck, notify);
                 }}
               >
-                ¿Seguro? Borrar
+                {doomed
+                  ? `¿Seguro? Borrar mazo y ${doomed} palabra${doomed === 1 ? "" : "s"}`
+                  : "¿Seguro? Borrar mazo"}
               </button>
             ) : (
               <button className="btn" onClick={() => setConfirming(true)} disabled={disabled}>
@@ -175,6 +187,16 @@ function RenameField({
     // Nombre vacío = no hacer nada. Borrar el nombre dejaría un mazo sin
     // identidad en la lista, y `db.decks` indexa `name`.
     if (!trimmed || trimmed === deck.name) return onDone();
+    // `decks.name` está indexado pero NO es único (`nodes.lemma` sí lo es, con
+    // `&`). Dos mazos con el mismo nombre son indistinguibles en la lista y en
+    // cualquier búsqueda por texto.
+    const clash = await db.decks
+      .filter((d) => d.id !== deck.id && d.name.trim().toLowerCase() === trimmed.toLowerCase())
+      .first();
+    if (clash) {
+      onNotify(`Ya existe un mazo llamado «${trimmed}».`);
+      return;
+    }
     await db.decks.update(deck.id!, { name: trimmed });
     onNotify(`Mazo renombrado a «${trimmed}».`);
     onDone();

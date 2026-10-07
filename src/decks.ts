@@ -39,21 +39,66 @@ export interface DeckStats {
 /** Una palabra es "nueva" si FSRS nunca la ha visto: sin card o en estado New. */
 const isNew = (n: Node) => !n.card || n.card.state === 0;
 
-export async function deckStats(deck: Deck, now = Date.now()): Promise<DeckStats> {
-  const ids = await deckNodeIds(deck);
-  if (!ids.length) return { total: 0, known: 0, learning: 0, due: 0, fresh: 0 };
+const EMPTY_STATS: DeckStats = { total: 0, known: 0, learning: 0, due: 0, fresh: 0 };
 
-  const nodes = await db.nodes.where("id").anyOf(ids).toArray();
-  const scoped = nodes.filter((n) => !deck.wordKinds || deck.wordKinds.includes(n.kind));
-  const unseen = scoped.filter((n) => !n.known);
-
+/** Recuento de una lista de nodos ya filtrada por `wordKinds`. */
+function countStats(nodes: Node[], now: number): DeckStats {
+  const unseen = nodes.filter((n) => !n.known);
   return {
-    total: scoped.length,
-    known: scoped.length - unseen.length,
+    total: nodes.length,
+    known: nodes.length - unseen.length,
     learning: unseen.filter((n) => !isNew(n)).length,
     due: unseen.filter((n) => !isNew(n) && n.due <= now).length,
     fresh: unseen.filter(isNew).length,
   };
+}
+
+/**
+ * Estadísticas de todos los mazos con DOS lecturas: una de `sources` y otra de
+ * `nodes`. Antes cada `DeckCard` abría su propio `useLiveQuery`, así que con 20
+ * mazos había 20 escaneos completos de `sources` y 20 suscripciones vivas que
+ * se relanzaban en cada cambio de un nodo.
+ *
+ * Una fuente puede pertenecer a varios mazos a la vez, y por eso no hay `break`
+ * en el bucle interno: se añade a todos los que le corresponden.
+ */
+export async function allDeckStats(
+  decks: Deck[],
+  now = Date.now(),
+): Promise<Map<number, DeckStats>> {
+  const out = new Map<number, DeckStats>();
+  for (const d of decks) if (d.id !== undefined) out.set(d.id, EMPTY_STATS);
+  if (!decks.length) return out;
+
+  const idsByDeck = new Map<number, Set<number>>();
+  for (const s of await db.sources.toArray()) {
+    for (const d of decks) {
+      if (d.id === undefined || !belongsToDeck(s, d)) continue;
+      const set = idsByDeck.get(d.id) ?? new Set<number>();
+      set.add(s.nodeId);
+      idsByDeck.set(d.id, set);
+    }
+  }
+
+  const wanted = [...new Set([...idsByDeck.values()].flatMap((s) => [...s]))];
+  const nodes = wanted.length ? await db.nodes.where("id").anyOf(wanted).toArray() : [];
+  const byId = new Map(nodes.map((n) => [n.id!, n]));
+
+  for (const [deckId, set] of idsByDeck) {
+    const deck = decks.find((d) => d.id === deckId)!;
+    const scoped = [...set]
+      .map((id) => byId.get(id))
+      .filter((n): n is Node => n !== undefined)
+      .filter((n) => !deck.wordKinds || deck.wordKinds.includes(n.kind));
+    out.set(deckId, countStats(scoped, now));
+  }
+  return out;
+}
+
+/** Azúcar sobre `allDeckStats` para cuando sólo interesa un mazo (tests, CLI). */
+export async function deckStats(deck: Deck, now = Date.now()): Promise<DeckStats> {
+  if (deck.id === undefined) return EMPTY_STATS;
+  return (await allDeckStats([deck], now)).get(deck.id) ?? EMPTY_STATS;
 }
 
 /**

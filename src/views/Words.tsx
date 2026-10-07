@@ -19,6 +19,27 @@ export default function Words() {
 
   const nodes = useLiveQuery(() => db.nodes.toArray(), []) ?? [];
   const senses = useLiveQuery(() => db.senses.toArray(), []) ?? [];
+  const sources = useLiveQuery(() => db.sources.toArray(), []) ?? [];
+  const decks = useLiveQuery(() => db.decks.toArray(), []) ?? [];
+  const texts = useLiveQuery(() => db.sourceTexts.toArray(), []) ?? [];
+
+  // De dónde viene cada palabra. Antes la columna "Origen" pintaba el *tipo*
+  // ("palabra"/"frase") y el origen real no se veía en ninguna parte — justo lo
+  // que hace falta revisar después de borrar un mazo.
+  const origin = useMemo(() => {
+    const deckName = new Map(decks.map((d) => [d.id!, d.name]));
+    const textTitle = new Map(texts.map((t) => [t.id!, t.title]));
+    const byNode = new Map<number, Set<string>>();
+    for (const s of sources) {
+      const label = s.deckId !== undefined ? deckName.get(s.deckId) : undefined;
+      const name = label ?? textTitle.get(s.sourceTextId ?? -1);
+      if (!name) continue;
+      const set = byNode.get(s.nodeId) ?? new Set<string>();
+      set.add(name);
+      byNode.set(s.nodeId, set);
+    }
+    return byNode;
+  }, [sources, decks, texts]);
   const translations = useMemo(
     () => new Map(senses.map((s) => [s.nodeId, s.translations])),
     [senses],
@@ -88,7 +109,10 @@ export default function Words() {
     });
 
   const removeSelected = async () => {
-    const ids = [...selected];
+    // `shownSelected`, NO `selected`: es lo que el botón de confirmación cuenta.
+    // Con `selected`, seleccionar 2 palabras, filtrar a 1 y confirmar "Borrar 1"
+    // borraba las 2 — una se iba sin haber salido en el recuento.
+    const ids = shownSelected;
     setSelected(new Set());
     await deleteWords(ids);
     notify(
@@ -217,7 +241,13 @@ export default function Words() {
                   >
                     {tr.slice(0, 3).join(" · ") || "—"}
                   </span>
-                  <span className="tag">{node.kind === "phrase" ? "frase" : "palabra"}</span>
+                  <span
+                    className="tag"
+                    title={originText(node.id, origin)}
+                    style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  >
+                    {originText(node.id, origin)}
+                  </span>
                   <span
                     className="pill"
                     title={`repetibilidad ${(retrievability(node.card) * 100).toFixed(0)}%`}
@@ -260,6 +290,19 @@ export default function Words() {
 function rLabel(node: Node): string {
   if (!node.card || node.card.state === 0) return "nueva";
   return node.due <= Date.now() ? "vencida" : "en curso";
+}
+
+/**
+ * "Sin mazo" es un estado real y accionable: son las palabras que sobrevivieron
+ * a un borrado por estar marcadas como conocidas, o las que vienen de una fuente
+ * ya eliminada. Antes esa fila no lo decía y una palabra sin origen era
+ * indistinguible de una normal.
+ */
+function originText(id: number | undefined, origin: Map<number, Set<string>>): string {
+  const names = id === undefined ? undefined : origin.get(id);
+  if (!names?.size) return "sin mazo";
+  const all = [...names].sort();
+  return all.length > 1 ? `${all[0]} +${all.length - 1}` : all[0]!;
 }
 
 /**

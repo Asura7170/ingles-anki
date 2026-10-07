@@ -243,3 +243,30 @@ describe("deleteDeck — casos sin palabras", () => {
     expect(r).toEqual({ words: 2, kept: 1 });
   });
 });
+
+describe("deleteDeck es atómico", () => {
+  it("si la cascada falla, no se borra el mazo", async () => {
+    // Con dos transacciones, un fallo entre medias dejaba el mazo borrado y las
+    // palabras huérfanas para siempre: el mismo bug que motivationsó el módulo,
+    // pero sólo bajo fallo — que es la forma que no se reproduce a mano.
+    const deck = await seedDeck("A", ["run", "study"]);
+    expect(await db.nodes.count()).toBe(2);
+
+    // Se rompe `relations`, que está en medio de la cascada: senses y sources ya
+    // se han borrado cuando salta. Se sabota `where` y no `delete` porque la
+    // cascada llama a `Table.where(...).delete()`, y `delete` vive en la
+    // Collection, no en la Table.
+    vi.spyOn(db.relations, "where").mockImplementation(() => {
+      throw new Error("boom");
+    });
+
+    await expect(deleteDeck(deck)).rejects.toThrow("boom");
+    vi.restoreAllMocks();
+
+    // Todo o nada: el mazo sigue y las palabras siguen.
+    expect(await db.decks.get(deck.id!)).toBeTruthy();
+    expect(await db.nodes.count()).toBe(2);
+    expect(await db.senses.count()).toBe(2);
+    expect(await db.sources.count()).toBe(2);
+  });
+});

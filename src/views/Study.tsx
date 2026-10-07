@@ -4,6 +4,7 @@ import { db, type Ease } from "../db";
 import { useApp } from "../store";
 import { blankSentence } from "../identity";
 import { speak, stop as stopTts } from "../tts";
+import CardImage from "./CardImage";
 import { makeShortcutHandler, useSentenceTranslation } from "../shortcuts";
 import type { Token } from "../diff";
 
@@ -97,6 +98,7 @@ export default function Study() {
 
       <div className="study-body">
         <div className="cloze">
+          <CardImage nodeId={node.id!} />
           {hasContext ? (
             <p className="sentence">
               {blank!.before}

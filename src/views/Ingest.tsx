@@ -76,7 +76,8 @@ export default function Ingest() {
       notify(
         `${res.deckName}: ${res.result.created} nuevas, ${res.result.merged} ya existían` +
           (res.result.changed ? `, ${res.result.changed} actualizadas` : "") +
-          (res.skipped ? `, ${res.skipped} sin reconocer` : ""),
+          (res.skipped ? `, ${res.skipped} sin reconocer` : "") +
+          (res.skippedImages ? `, ${res.skippedImages} imágenes sin guardar` : ""),
       );
       scheduleAutoSave();
     } catch (err) {

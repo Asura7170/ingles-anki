@@ -163,6 +163,30 @@ describe("ingest — fusión de contenido (nunca sobrescribir)", () => {
     const rows = await db.examples.toArray();
     expect(rows[0]!.sourceId).toBeNull();
   });
+
+  it("acumula imágenes de dos mazos y no duplica la misma", async () => {
+    const a = { name: "a.jpg", mime: "image/jpeg", bytes: new Uint8Array([1]) };
+    const b = { name: "b.jpg", mime: "image/jpeg", bytes: new Uint8Array([2]) };
+    // Mismo deck+nota pero contenido distinto (segundo ingest trae una más):
+    // el `changed` salta y las frases/imágenes nuevas se adjuntan igual.
+    await ingest([item("run", { images: [a] })], {
+      kind: "apkg",
+      priority: 30,
+      deckId: 1,
+      noteId: 1,
+    });
+    await ingest([item("run", { images: [a, b] })], {
+      kind: "apkg",
+      priority: 30,
+      deckId: 1,
+      noteId: 1,
+    });
+
+    const node = await db.nodes.where("lemma").equals("run").first();
+    const rows = await db.media.where("nodeId").equals(node!.id!).toArray();
+    expect(rows.map((r) => r.name).sort()).toEqual(["a.jpg", "b.jpg"]);
+    expect(rows.find((r) => r.name === "a.jpg")!.bytes).toEqual(new Uint8Array([1]));
+  });
 });
 
 describe("ingest — procedencia y re-import", () => {

@@ -2,7 +2,7 @@ import type { IngestResult } from "./ingest";
 import { ingest, type IngestItem } from "./ingest";
 import { db } from "./db";
 import { identify } from "./identity";
-import { rootOf, type ApkgNote, type ApkgOut } from "./apkg-format";
+import { mimeOf, rootOf, type ApkgNote, type ApkgOut } from "./apkg-format";
 
 let worker: Worker | null = null;
 
@@ -72,6 +72,43 @@ export interface ApkgImport {
   deckName: string;
   result: IngestResult;
   skipped: number;
+  /** Imágenes referenciadas que no se guardaron (rotas, enormes, sin mime). */
+  skippedImages: number;
+}
+
+/**
+ * 5 MB por imagen. Sin tope, un .apkg con imágenes enormes revienta la cuota
+ * de IndexedDB a mitad de importación y deja el mazo a medias. Anki permite
+ * 100 MiB por fichero, pero un mazo de vocabulario no necesita ni la
+ * vigésima parte: esto es calibración, no regla adivinada.
+ */
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Resuelve los nombres de `note.images` a bytes listos para `ingest`.
+ * Pura a propósito: `importApkg` ya está en CC 14 al 0 % y cada rama suya
+ * nace ciega. Esto se prueba sin Dexie ni worker.
+ *
+ * Rota (el mapa la nombra pero el zip no la trae), enorme o con extensión
+ * que `<img>` no pinta: la palabra entra igual, sin ella. Anki hace lo mismo
+ * al importar: deja la referencia y sigue.
+ */
+export function resolveImages(
+  names: string[],
+  media: Record<string, Uint8Array>,
+): { images: NonNullable<IngestItem["images"]>; skipped: number } {
+  const images: NonNullable<IngestItem["images"]> = [];
+  let skipped = 0;
+  for (const name of names) {
+    const bytes = media[name];
+    const mime = mimeOf(name);
+    if (!bytes || bytes.length > MAX_IMAGE_BYTES || !mime) {
+      skipped++;
+      continue;
+    }
+    images.push({ name, mime, bytes });
+  }
+  return { images, skipped };
 }
 
 export async function importApkg(file: File): Promise<ApkgImport> {
@@ -89,6 +126,7 @@ export async function importApkg(file: File): Promise<ApkgImport> {
 
   const total: IngestResult = { created: 0, merged: 0, changed: 0 };
   let skipped = 0;
+  let skippedImages = 0;
 
   // Una pasada por nota: preserva noteId/deckId/level como procedencia, que es
   // lo que permite detectar cambios al reimportar.
@@ -100,6 +138,9 @@ export async function importApkg(file: File): Promise<ApkgImport> {
       continue;
     }
 
+    const resolved = resolveImages(note.images, raw.media);
+    skippedImages += resolved.skipped;
+
     const item: IngestItem = {
       headword: mapped.headword,
       lemma: id.lemma,
@@ -107,6 +148,7 @@ export async function importApkg(file: File): Promise<ApkgImport> {
       translations: mapped.translations.slice(0, 3),
       senseTranslations: mapped.translations.slice(0, 3),
       examples: mapped.example ? [{ text: mapped.example }] : undefined,
+      images: resolved.images.length ? resolved.images : undefined,
     };
 
     const r = await ingest([item], {
@@ -121,5 +163,5 @@ export async function importApkg(file: File): Promise<ApkgImport> {
     total.changed += r.changed;
   }
 
-  return { deckId, deckName, result: total, skipped };
+  return { deckId, deckName, result: total, skipped, skippedImages };
 }

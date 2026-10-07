@@ -62,6 +62,7 @@ beforeEach(async () => {
   await db.open();
   await db.nodes.clear();
   await db.senses.clear();
+  await db.media.clear();
   await db.decks.clear();
   await db.exposure.clear();
 });
@@ -91,6 +92,21 @@ describe("con frase: cloze en lugar de palabra suelta", () => {
     await mount([makeItem({ sentence: undefined })]);
     expect(screen.getByText(/Sin frase disponible/)).toBeTruthy();
     expect(screen.getByText("startle")).toBeTruthy();
+  });
+
+  it("con imagen, pinta el <img> con su object URL", async () => {
+    // Se afirma el `src`, no que la imagen cargue: happy-dom no resuelve
+    // `blob:` (`enableImageFileLoading: false`), así que `load` nunca llega.
+    await db.media.add({
+      nodeId: 1,
+      name: "startle.jpg",
+      mime: "image/jpeg",
+      bytes: new Uint8Array([0xff, 0xd8, 0xff]),
+    });
+    await mount([makeItem({ sentence: undefined })]);
+    await waitFor(() => expect(document.querySelector("img.card-image")).toBeTruthy());
+    const img = document.querySelector("img.card-image") as HTMLImageElement;
+    expect(img.getAttribute("src")).toMatch(/^blob:/);
   });
 
   it("los dos botones de audio están siempre", async () => {

@@ -28,6 +28,7 @@ async function cascade(ids: number[]): Promise<void> {
   await db.senses.where("nodeId").anyOf(ids).delete();
   await db.sources.where("nodeId").anyOf(ids).delete();
   await db.examples.where("nodeId").anyOf(ids).delete();
+  await db.media.where("nodeId").anyOf(ids).delete();
   await db.relations.where("fromNodeId").anyOf(ids).delete();
   await db.reviewLog.where("nodeId").anyOf(ids).delete();
   await db.exposure.where("nodeId").anyOf(ids).delete();

@@ -65,6 +65,31 @@ export interface Example {
   sourceId?: number | null;
 }
 
+/**
+ * Una imagen del .apkg, colgada del NODO y no del source.
+ *
+ * La imagen es de la palabra, como el SRS: una palabra compartida entre dos
+ * mazos sobrevive al borrado de uno (`stillLinked` en purge.ts), y su imagen
+ * con ella. Y una palabra `known` sobrevive "sin mazo" con todo lo suyo. Con
+ * `sourceId` en vez de `nodeId`, borrar el mazo se llevaría la imagen de una
+ * palabra que sigue viva — el mismo corte que ya se rampó para las
+ * transcripciones compartidas.
+ *
+ * `bytes` es `Uint8Array` y no `Blob`: el `Blob` de happy-dom pierde el
+ * contenido en silencio al pasar por `structuredClone` (guarda el buffer en
+ * una clave `symbol`, que no se clona), así que los tests escribirían
+ * `{type, size}` sin bytes. `Uint8Array` se clona bien en Node, en el
+ * navegador y en fake-indexeddb.
+ */
+export interface Media {
+  id?: number;
+  nodeId: number;
+  /** Nombre original en el .apkg, para el aviso y para no perder la pista. */
+  name: string;
+  mime: string;
+  bytes: Uint8Array;
+}
+
 export interface Relation {
   id?: number;
   fromNodeId: number;
@@ -126,6 +151,7 @@ export const TABLES = [
   "senses",
   "sources",
   "examples",
+  "media",
   "relations",
   "reviewLog",
   "exposure",
@@ -138,6 +164,7 @@ class VocabDB extends Dexie {
   senses!: Table<Sense, number>;
   sources!: Table<Source, number>;
   examples!: Table<Example, number>;
+  media!: Table<Media, number>;
   relations!: Table<Relation, number>;
   reviewLog!: Table<ReviewLog, number>;
   exposure!: Table<Exposure, number>;
@@ -152,6 +179,24 @@ class VocabDB extends Dexie {
       senses: "++id, nodeId, due",
       sources: "++id, nodeId, deckId, noteId, sourceTextId",
       examples: "++id, nodeId",
+      relations: "++id, fromNodeId, toWord",
+      reviewLog: "++id, nodeId, ts",
+      exposure: "++id, nodeId, ts",
+      sourceTexts: "++id, importedAt",
+      decks: "++id, name, kind",
+      settings: "key",
+    });
+    // v2 añade `media` sin tocar nada más. Dexie exige re-declarar las 10
+    // tablas completas: omitir una la borraría con todos sus datos
+    // (`deleteRemovedTables`). Al ser puramente aditiva no necesita
+    // `.upgrade()`: `createMissingTables` la crea vacía y los datos viejos
+    // ni se enteran.
+    this.version(2).stores({
+      nodes: "++id, &lemma, kind, known, due, freqRank",
+      senses: "++id, nodeId, due",
+      sources: "++id, nodeId, deckId, noteId, sourceTextId",
+      examples: "++id, nodeId",
+      media: "++id, nodeId",
       relations: "++id, fromNodeId, toWord",
       reviewLog: "++id, nodeId, ts",
       exposure: "++id, nodeId, ts",

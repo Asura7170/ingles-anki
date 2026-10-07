@@ -34,10 +34,45 @@ interface AnyTable {
   bulkAdd(items: unknown[]): Promise<unknown>;
 }
 
+interface MediaRow {
+  bytes?: unknown;
+}
+
+/**
+ * `media.bytes` es `Uint8Array`, y el JSON no sabe lo que es: `JSON.stringify`
+ * de un `Uint8Array` da `{"0":137,"1":80,…}`, que al importar vuelve como
+ * objeto plano y la imagen muere. Sólo la tabla `media` pasa por base64; el
+ * resto del dump sale tal cual. `DUMP_VERSION` NO sube por esto: la línea de
+ * `importFromFile` ya tolera una clave ausente, así que `data.media` es
+ * opcional y un backup v1 sin imágenes restaura entero.
+ */
+const B64 = {
+  out: (row: unknown): unknown => {
+    const m = row as MediaRow;
+    if (!(m.bytes instanceof Uint8Array)) return row;
+    let s = "";
+    for (let i = 0; i < m.bytes.length; i += 8192) {
+      s += String.fromCharCode(...m.bytes.subarray(i, i + 8192));
+    }
+    return { ...(row as object), bytes: btoa(s) };
+  },
+  in: (row: unknown): unknown => {
+    const m = row as MediaRow;
+    if (typeof m.bytes !== "string") return row;
+    const s = atob(m.bytes);
+    const bytes = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
+    return { ...(row as object), bytes };
+  },
+};
+
 export async function buildDump(): Promise<Dump> {
   const tables = TABLES.map((t) => db[t] as unknown as AnyTable);
   const data: Record<string, unknown[]> = {};
-  for (let i = 0; i < TABLES.length; i++) data[TABLES[i]!] = await tables[i]!.toArray();
+  for (let i = 0; i < TABLES.length; i++) {
+    const rows = await tables[i]!.toArray();
+    data[TABLES[i]!] = TABLES[i] === "media" ? rows.map(B64.out) : rows;
+  }
   return { version: DUMP_VERSION, exportedAt: Date.now(), data };
 }
 
@@ -61,7 +96,8 @@ export async function importFromFile(file: File): Promise<void> {
     for (const t of tables) await t.clear();
     for (let i = 0; i < TABLES.length; i++) {
       const rows = parsed.data[TABLES[i]!];
-      if (Array.isArray(rows) && rows.length) await tables[i]!.bulkAdd(rows);
+      if (!Array.isArray(rows) || !rows.length) continue;
+      await tables[i]!.bulkAdd(TABLES[i] === "media" ? rows.map(B64.in) : rows);
     }
   });
 }

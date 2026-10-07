@@ -4,6 +4,9 @@ import initSqlJs from "sql.js";
 import { rootOf } from "./apkg-format";
 import { parseApkgBytes } from "./apkg-parse";
 
+const hexToBytes = (hex: string) =>
+  new Uint8Array((hex.match(/../g) ?? []).map((h) => parseInt(h, 16)));
+
 /**
  * El worker original hacía `SELECT id, flds FROM notes` — no `nid`, que no existe
  * en el esquema de Anki. Este archivo reconstruye un .apkg real para fijar ese
@@ -175,6 +178,180 @@ describe("el .apkg se parsea", () => {
   it("sin collection.anki2 lanza con un mensaje útil", () => {
     const roto = zipSync({ media: new TextEncoder().encode("{}") });
     expect(() => parse(roto)).toThrow(/collection\.anki2/);
+  });
+
+  // --- media ---------------------------------------------------------------
+  //
+  // El mapa `media` es índice-en-zip → nombre. Las entradas del zip se llaman
+  // SIEMPRE por índice, nunca por nombre, así que el nombre real hay que
+  // resolverlo por el mapa.
+  const CAT = new Uint8Array([0x89, 0x50, 0x4e, 0x47]); // cabecera PNG
+  const DOG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x42]);
+
+  /**
+   * `MediaEntries{ entries: [MediaEntry{name,size,sha1}, …] }` en hexadecimal.
+   * Un `repeated` en protobuf son N campos sueltos con la misma etiqueta, NO
+   * un envoltorio único: cada entrada lleva su propio tag+longitud. Dos
+   * entradas a propósito, y la segunda con un espacio en el nombre, que es
+   * justo el caso que rompía el folklore del percent-encoding.
+   */
+  // Cada entrada: tag exterior 0x0a + longitud del entry entero + entry.
+  // Sin ese envoltorio el parser lee el tag del `name` como si fuese el del
+  // entry y el mapa sale vacío — que es exactamente lo que pasó al escribir
+  // este fixture la primera vez.
+  const PROTO = hexToBytes(
+    "0a22" +
+      "0a07" +
+      "6361742e6a7067" +
+      "10e20a" +
+      "1a14" +
+      "01".repeat(20) +
+      "0a2b" +
+      "0a10" +
+      "646f6720616e6420626f6e652e706e67" +
+      "108010" +
+      "1a14" +
+      "02".repeat(20),
+  );
+
+  /**
+   * Envoltura zstd mínima, hecha a mano porque `fzstd` sólo descomprime.
+   * Magic + descriptor (single-segment, FCS de 4 bytes) + tamaño + un bloque
+   * RAW con Last_Block=1. Es el mismo formato que emite el exportador de Anki.
+   */
+  const zstdRaw = (payload: Uint8Array): Uint8Array => {
+    const n = payload.length;
+    // magic(4) + descriptor(1) + FCS(4) + Block_Header(3).
+    const header = new Uint8Array(12);
+    header.set([0x28, 0xb5, 0x2f, 0xfd, 0xa0], 0);
+    new DataView(header.buffer).setUint32(5, n, true);
+    const bh = (n << 3) | 1; // Last_Block=1, tipo 0 (RAW), tamaño
+    header[9] = bh & 0xff;
+    header[10] = (bh >>> 8) & 0xff;
+    header[11] = (bh >>> 16) & 0xff;
+    return new Uint8Array([...header, ...payload]);
+  };
+
+  /** Re-empaqueta el mapa y las entradas de media como los escribe Anki. */
+  function withMedia(
+    opts: Parameters<typeof buildApkg>[0],
+    media: { map: Uint8Array; files: Record<string, Uint8Array> },
+  ): Uint8Array {
+    return zipSync({ ...unzipSync(buildApkg(opts)), media: media.map, ...media.files });
+  }
+
+  it("legacy: resuelve <img> a su entrada del zip por el mapa media", () => {
+    const r = parse(
+      withMedia(
+        { notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]] },
+        {
+          map: new TextEncoder().encode('{"0":"cat.jpg","1":"dog and bone.png"}'),
+          files: { "0": CAT, "1": DOG },
+        },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes[0]!.images).toEqual(["cat.jpg"]);
+    // El nombre del zip es el índice; `media` es quien traduce.
+    expect(r.media["cat.jpg"]).toEqual(CAT);
+    expect(r.media["dog and bone.png"]).toEqual(DOG);
+    // Y el texto sigue limpio: la imagen se extrae aparte, no ensucia el campo.
+    expect(r.notes[0]!.fields[0]).toBe("");
+  });
+
+  it("v3: el mapa media es zstd+protobuf, no JSON", () => {
+    const r = parse(
+      withMedia(
+        {
+          notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]],
+          v3: true,
+        },
+        { map: zstdRaw(PROTO), files: { "0": CAT, "1": DOG } },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes[0]!.images).toEqual(["cat.jpg"]);
+    // Orden del vector = índice, sin campo índice: la segunda entrada es el "1".
+    expect(r.media["cat.jpg"]).toEqual(CAT);
+    expect(r.media["dog and bone.png"]).toEqual(DOG);
+  });
+
+  it("recoge el <img> de todos los campos, no sólo del ejemplo", () => {
+    // La imagen es de la palabra, no de la frase. Y si el texto de la frase
+    // llevara el <img>, `blankSentence` trocearía por espacios y `identify`
+    // devolvería null en "<img": el clo se rompería. Por eso se extrae antes
+    // de stripHtml y en todos los campos.
+    const r = parse(
+      withMedia(
+        {
+          notes: [
+            [1, ['<img src="cat.jpg">', "gato", 'A <img src="cat.jpg"> sleeps.'].join("\x1f"), 2],
+          ],
+        },
+        { map: new TextEncoder().encode('{"0":"cat.jpg"}'), files: { "0": CAT } },
+      ),
+    );
+    expect(r.notes[0]!.images).toEqual(["cat.jpg"]); // dedup, no dos veces
+    expect(r.notes[0]!.fields[2]).toBe("A sleeps.");
+  });
+
+  it("sin fichero media no es error: se importa sin imágenes", () => {
+    const r = parse(
+      zipSync({ "collection.anki2": unzipSync(buildApkg({ notes: SAMPLE }))["collection.anki2"]! }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes).toHaveLength(3);
+    expect(r.media).toEqual({});
+  });
+
+  it("<img> que el mapa no resuelve se degrada sin romper la importación", () => {
+    const r = parse(
+      withMedia(
+        { notes: [[1, ['<img src="fantasma.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]] },
+        { map: new TextEncoder().encode('{"0":"cat.jpg"}'), files: { "0": CAT } },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes).toHaveLength(1);
+    expect(r.media["fantasma.jpg"]).toBeUndefined();
+  });
+
+  it("una entrada del zip que el mapa nombra pero no existe se salta", () => {
+    const r = parse(
+      withMedia(
+        { notes: SAMPLE },
+        { map: new TextEncoder().encode('{"0":"cat.jpg","7":"hole.png"}'), files: { "0": CAT } },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(Object.keys(r.media)).toEqual(["cat.jpg"]);
+  });
+
+  it("un mapa media corrupto deja el mazo entero importable", () => {
+    const r = parse(
+      withMedia({ notes: SAMPLE }, { map: new TextEncoder().encode("esto no es json"), files: {} }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes).toHaveLength(3);
+    expect(r.media).toEqual({});
+  });
+
+  it("un mapa media v3 truncado a medias se lee hasta donde llega", () => {
+    const r = parse(
+      withMedia(
+        { notes: SAMPLE, v3: true },
+        // Se corta justo después del tag de la segunda entrada (byte 36),
+        // dejando su longitud a medias: la primera entra, la segunda se
+        // pierde. Cortar la cola de un VALOR no bastaría —los campos
+        // len-delimited se autodelimitan y el nombre ya se habría leído—,
+        // así que el corte va en el prefijo. Un mapa a medias no puede
+        // tumbar la importación.
+        { map: zstdRaw(PROTO.subarray(0, 37)), files: { "0": CAT, "1": DOG } },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes).toHaveLength(3);
+    expect(Object.keys(r.media)).toEqual(["cat.jpg"]);
   });
 
   it("deck vacío → notes vacío, no error", () => {

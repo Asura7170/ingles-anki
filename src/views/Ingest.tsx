@@ -2,6 +2,7 @@ import { useState } from "react";
 import { db } from "../db";
 import { ingest, hash } from "../ingest";
 import { extractCandidates, loadFrequency, freqRank, type Candidate } from "../identity";
+import { findOrAddSourceText } from "../ingest";
 import { importApkg } from "../apkg";
 import { useApp } from "../store";
 import { scheduleAutoSave } from "../backup";
@@ -220,12 +221,7 @@ async function createDeckFromText({
   text: string;
   preview: Candidate[];
 }): Promise<{ created: number; merged: number }> {
-  const sourceTextId = (await db.sourceTexts.add({
-    kind: "text",
-    title: name,
-    body: text,
-    importedAt: Date.now(),
-  }))!;
+  const sourceTextId = await findOrAddSourceText(name, text);
 
   const result = await ingest(
     preview.map((c) => ({

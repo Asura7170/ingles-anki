@@ -100,6 +100,15 @@ function DeckCard({
   // puede quitar — que es el peor error posible en un borrado.
   const doomed = stats ? stats.total - stats.known : 0;
 
+  // Qué se lleva el borrado, en una frase. Un máximo, nunca una promesa: si la
+  // transcripción la comparte otro mazo, `deleteDeck` conservará esas palabras y
+  // el aviso posterior lo explica. Y un mazo importado no tiene transcripción,
+  // así que no se nombra.
+  const parts: string[] = [];
+  if (doomed) parts.push(`${doomed} palabra${doomed === 1 ? "" : "s"}`);
+  if (deck.sourceTextIds?.length) parts.push("la transcripción");
+  const confirmLabel = `¿Seguro? Borrar mazo${parts.length ? `, ${parts.join(" y ")}` : ""}`;
+
   return (
     <div className="panel">
       <div className="row" style={{ padding: "12px 14px" }}>
@@ -133,9 +142,7 @@ function DeckCard({
                   void removeDeck(deck, notify);
                 }}
               >
-                {doomed
-                  ? `¿Seguro? Borrar mazo y ${doomed} palabra${doomed === 1 ? "" : "s"}`
-                  : "¿Seguro? Borrar mazo"}
+                {confirmLabel}
               </button>
             ) : (
               <button className="btn" onClick={() => setConfirming(true)} disabled={disabled}>
@@ -161,14 +168,25 @@ function DeckCard({
  * también la pestaña Palabras, y en un componente no se puede probar sin DOM.
  */
 async function removeDeck(deck: Deck, notify: (msg: string) => void): Promise<void> {
-  const { words, kept } = await deleteDeck(deck);
-  notify(
-    `Mazo «${deck.name}» borrado.` +
-      (words || kept
-        ? ` ${words} palabra${words === 1 ? "" : "s"} eliminada${words === 1 ? "" : "s"}` +
-          (kept ? `, ${kept} conservada${kept === 1 ? "" : "s"} por estar marcada.` : ".")
-        : ""),
-  );
+  const { words, kept, texts, shared } = await deleteDeck(deck);
+  const parts = [`Mazo «${deck.name}» borrado.`];
+  if (words || kept) {
+    parts.push(
+      `${words} palabra${words === 1 ? "" : "s"} eliminada${words === 1 ? "" : "s"}` +
+        (kept ? `, ${kept} conservada${kept === 1 ? "" : "s"} por estar marcada` : "") +
+        ".",
+    );
+  }
+  if (texts) parts.push("Transcripción eliminada; no queda en el backup.");
+  // La confirmación promete un máximo de palabras, y con la transcripción
+  // compartida no se puede cumplir. Sin esta línea el usuario ve "Borrar mazo y
+  // 12 palabras" y luego un aviso que no menciona ninguna palabra.
+  if (shared) {
+    parts.push(
+      `Se conserva la transcripción y sus palabras: la comparten ${shared} mazo${shared === 1 ? "" : "s"}.`,
+    );
+  }
+  notify(parts.join(" "));
 }
 
 function RenameField({

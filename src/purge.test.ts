@@ -2,7 +2,8 @@ import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { IDBFactory } from "fake-indexeddb";
 import { db, type Deck } from "./db";
-import { deleteDeck, deleteWords } from "./purge";
+import { buildQueue } from "./decks";
+import { deleteDeck, deleteWords, purgeOrphanTexts } from "./purge";
 import { ingest, type IngestItem } from "./ingest";
 import { newCard, review } from "./srs";
 
@@ -139,11 +140,211 @@ describe("deleteDeck — el bug de los mazos generados", () => {
     expect(await db.nodes.count()).toBe(0);
   });
 
-  it("no borra el texto guardado: es lo único que queda del original", async () => {
+  it("se lleva la transcripción: queda huérfana e inalcanzable", async () => {
     const deck = await seedGenerated("Transcripción", ["run"]);
-    await deleteDeck(deck);
-    // Sin esto habría que volver a pegar la transcripción a mano.
+    const r = await deleteDeck(deck);
+
+    // Antes sobraban una por ciclo pegar->borrar, y `sourceTexts` no tiene
+    // ninguna pantalla donde verlas.
+    expect(r.texts).toBe(1);
+    expect(await db.sourceTexts.count()).toBe(0);
+  });
+
+  it("un mazo importado no toca ninguna transcripción", async () => {
+    const sourceTextId = (await db.sourceTexts.add({
+      kind: "text",
+      title: "T",
+      body: "x",
+      importedAt: NOW,
+    }))!;
+    await ingest([item("run")], { kind: "text", priority: 20, sourceTextId });
+    const imported = await seedDeck("A", ["study"]);
+
+    const r = await deleteDeck(imported);
+    expect(r.texts).toBe(0);
     expect(await db.sourceTexts.count()).toBe(1);
+  });
+
+  it("deja la exposición: es un hecho sobre ti, como la marca «conocida»", async () => {
+    const deck = await seedGenerated("T", ["run"]);
+    const node = (await db.nodes.where("lemma").equals("run").first())!;
+    await db.nodes.update(node.id!, { known: 1 }); // sobrevive al mazo
+    await db.exposure.add({ nodeId: node.id!, sourceTextId: 1, ts: NOW, occurrences: 4 });
+
+    await deleteDeck(deck);
+
+    expect(await db.sourceTexts.count()).toBe(0);
+    expect(await db.nodes.count()).toBe(1);
+    // Queda una referencia colgante al id borrado. Inofensiva: `++id` nunca
+    // reutiliza y la tabla no se lee en ningún sitio del proyecto.
+    expect(await db.exposure.count()).toBe(1);
+  });
+});
+
+/**
+ * El escenario que faltaba y que rompe la costura más fácil de arruinar.
+ *
+ * Un mazo generado se identifica por `sourceTextIds` y sus filas de `sources`
+ * llevan `sourceTextId` pero NO `deckId`: no hay forma de saber cuál era de
+ * cuál. Con dos mazos sobre la misma transcripción, `belongsToDeck` devuelve
+ * `true` para las mismas filas en ambos, así que un `mine` poblado volvería
+ * huérfanas las palabras del otro mazo y las borraría.
+ */
+describe("deleteDeck — transcripción compartida", () => {
+  /** Dos mazos generados sobre el MISMO `sourceTextId`. */
+  async function seedShared(): Promise<{ a: Deck; b: Deck; sourceTextId: number }> {
+    const sourceTextId = (await db.sourceTexts.add({
+      kind: "text",
+      title: "Ch. 1",
+      body: "run study child",
+      importedAt: NOW,
+    }))!;
+    await ingest(["run", "study", "child"].map(item), {
+      kind: "text",
+      priority: 20,
+      sourceTextId,
+    });
+    const aId = (await db.decks.add({
+      name: "A",
+      kind: "generated",
+      sourceTextIds: [sourceTextId],
+      createdAt: NOW,
+    }))!;
+    const bId = (await db.decks.add({
+      name: "B",
+      kind: "generated",
+      sourceTextIds: [sourceTextId],
+      createdAt: NOW + 1,
+    }))!;
+    return {
+      a: { name: "A", kind: "generated", sourceTextIds: [sourceTextId], createdAt: NOW, id: aId },
+      b: {
+        name: "B",
+        kind: "generated",
+        sourceTextIds: [sourceTextId],
+        createdAt: NOW + 1,
+        id: bId,
+      },
+      sourceTextId,
+    };
+  }
+
+  it("borrar uno NO deja sin palabras al otro", async () => {
+    const { a, b } = await seedShared();
+    expect(await db.nodes.count()).toBe(3);
+
+    const r = await deleteDeck(a);
+
+    expect(r.words).toBe(0);
+    expect(r.kept).toBe(0);
+    expect(r.shared).toBe(1);
+    expect(await db.nodes.count()).toBe(3);
+    expect(await db.sources.count()).toBe(3);
+    // Y el otro mazo sigue teniendo su cola intacta.
+    expect((await buildQueue(b, 20, NOW)).map((i) => i.node.lemma).sort()).toEqual([
+      "child",
+      "run",
+      "study",
+    ]);
+  });
+
+  it("NO borra la transcripción compartida", async () => {
+    const { a, sourceTextId } = await seedShared();
+    await deleteDeck(a);
+    expect(await db.sourceTexts.count()).toBe(1);
+    expect(await db.sourceTexts.get(sourceTextId)).toBeTruthy();
+  });
+
+  it("borra el mazo igualmente: sólo se salta la parte del texto", async () => {
+    const { a, b } = await seedShared();
+    await deleteDeck(a);
+    expect(await db.decks.get(a.id!)).toBeUndefined();
+    expect(await db.decks.get(b.id!)).toBeTruthy();
+  });
+
+  it("borrados los dos, la transcripción se va con el último", async () => {
+    const { a, b } = await seedShared();
+    await deleteDeck(a);
+    expect(await db.sourceTexts.count()).toBe(1);
+
+    await deleteDeck(b);
+    // Con A ya no está, la transcripción es exclusiva de B: sus palabras quedan
+    // huérfanas y se van con ella, que es la regla normal.
+    expect(await db.sourceTexts.count()).toBe(0);
+    expect(await db.nodes.count()).toBe(0);
+  });
+
+  it("una fila con deckId y sourceTextId a la vez no se roba", async () => {
+    // Sólo un backup restaurado a mano puede producirla: `importFromFile` no
+    // valida nada. Sin el filtro, el mazo generado se la atribuiría y al borrar
+    // se llevaría las palabras del mazo importado.
+    const generated = await seedGenerated("G", ["run"]);
+    const imported = await seedDeck("I", ["study"]);
+    await db.sources.add({
+      nodeId: (await db.nodes.where("lemma").equals("study").first())!.id!,
+      kind: "text",
+      // La fila reclama los dos mazos a la vez.
+      deckId: imported.id!,
+      sourceTextId: generated.sourceTextIds![0]!,
+      priority: 20,
+      contentVersion: "x",
+      addedAt: NOW,
+    });
+
+    const r = await deleteDeck(generated);
+
+    // "study" sigue viva: la fila que reclama los dos mazos queda fuera de
+    // `mine` por llevar `deckId`, así que cuenta como origen ajeno y no se
+    // vuelve huérfana. Ese es el punto del filtro.
+    expect(await db.nodes.where("lemma").equals("study").first()).toBeTruthy();
+    // Y "run", que sólo existía por la transcripción de G, sí se va.
+    expect(r.words).toBe(1);
+    expect(await db.nodes.where("lemma").equals("run").first()).toBeUndefined();
+  });
+});
+
+describe("purgeOrphanTexts", () => {
+  it("borra las que no reclama ningún mazo", async () => {
+    await db.sourceTexts.add({ kind: "text", title: "T", body: "x", importedAt: NOW });
+    await db.sourceTexts.add({ kind: "text", title: "U", body: "y", importedAt: NOW + 1 });
+
+    expect(await purgeOrphanTexts()).toBe(2);
+    expect(await db.sourceTexts.count()).toBe(0);
+  });
+
+  it("respeta la que un mazo todavía usa", async () => {
+    await seedGenerated("A", ["run"]);
+    expect(await purgeOrphanTexts()).toBe(0);
+    expect(await db.sourceTexts.count()).toBe(1);
+  });
+
+  it("NO borra palabras ni su historial", async () => {
+    const deck = await seedGenerated("A", ["run"]);
+    await db.nodes.update(1, { known: 1 });
+    const card = review(newCard(NOW), 3, NOW - day);
+    await db.nodes.update(1, { card, due: card.due.getTime() });
+    await db.reviewLog.add({ nodeId: 1, ts: NOW, ease: 3, source: "button" });
+
+    await purgeOrphanTexts();
+
+    // Una limpieza de disco no puede borrar historial de estudio: contradice la
+    // doctrina de `deleteDeck`, donde la marca `known` sobrevive al mazo.
+    expect(await db.nodes.count()).toBe(1);
+    expect(await db.reviewLog.count()).toBe(1);
+    expect(await db.sources.count()).toBe(1);
+    void deck;
+  });
+
+  it("sin huérfanas devuelve 0 y no toca nada", async () => {
+    await seedGenerated("A", ["run"]);
+    expect(await purgeOrphanTexts()).toBe(0);
+    expect(await db.sourceTexts.count()).toBe(1);
+  });
+
+  it("deja limpia la que ya no reclama nadie tras borrar su mazo", async () => {
+    const deck = await seedGenerated("A", ["run"]);
+    await deleteDeck(deck);
+    expect(await db.sourceTexts.count()).toBe(0);
   });
 });
 
@@ -213,7 +414,7 @@ describe("deleteDeck — casos sin palabras", () => {
   it("mazo vacío borra 0 y sólo se va él mismo", async () => {
     const id = (await db.decks.add({ name: "Vacío", kind: "import", createdAt: NOW }))!;
     const r = await deleteDeck({ name: "Vacío", kind: "import", createdAt: NOW, id });
-    expect(r).toEqual({ words: 0, kept: 0 });
+    expect(r).toEqual({ words: 0, kept: 0, texts: 0, shared: 0 });
     expect(await db.decks.count()).toBe(0);
   });
 
@@ -240,7 +441,7 @@ describe("deleteDeck — casos sin palabras", () => {
     const deck = await seedDeck("A", ["a1", "b1", "c1"]);
     await db.nodes.update(1, { known: 1 });
     const r = await deleteDeck(deck);
-    expect(r).toEqual({ words: 2, kept: 1 });
+    expect(r).toEqual({ words: 2, kept: 1, texts: 0, shared: 0 });
   });
 });
 

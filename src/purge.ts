@@ -56,19 +56,55 @@ export async function deleteWords(ids: number[]): Promise<number> {
  * sin ninguno. Consecuencia asumida: studied un mazo, no marcaste nada, y al
  * borrarlo pierdes también el historial de repaso.
  *
- * `sourceTexts` NO se borra: es lo único que queda de lo que pegaste y va en el
- * backup. Sin él no hay forma de recuperar el texto sin volver a pegarlo.
+ * La transcripción SÍ se borra, junto al mazo que la creó. Es texto que
+ * escribiste tú y que no está en ninguna otra parte salvo un backup que ya
+ * tengas exportado; dejarla huérfana la convertía en basura inalcanzable, una
+ * fila por cada ciclo pegar→borrar. `purgeOrphanTexts` limpia las que ya
+ * quedaron.
  *
- * Devuelve el recuento real para que el aviso diga la verdad.
+ * `exposure` no se toca: es un hecho sobre ti, como la marca `known`, así que
+ * sobrevive a la transcripción. Deja una referencia colgante a un id que ya no
+ * existe, inofensiva porque `++id` nunca reutiliza y la tabla no se lee en
+ * ningún sitio.
+ *
+ * Devuelve el recuento real para que el aviso diga la verdad, incluido
+ * `shared`: si una transcripción la comparten varios mazos, no se puede borrar
+ * sin matar al otro (ver `ownsTexts`).
  */
-export async function deleteDeck(deck: Deck): Promise<{ words: number; kept: number }> {
+export async function deleteDeck(
+  deck: Deck,
+): Promise<{ words: number; kept: number; texts: number; shared: number }> {
   const ids = await deckNodeIds(deck);
   const sources = await db.sources.toArray();
-  // Toda fila guardada ya tiene id (Dexie lo asigna), pero el tipo lo marca
-  // opcional, así que se filtra en vez de usar `!` en 6 sitios.
+
+  // Transcripciones que otro mazo todavía reclama.
+  const shared = new Set<number>();
+  for (const d of await db.decks.toArray()) {
+    if (d.id === deck.id) continue;
+    // Sin filtrar por `kind`: `belongsToDeck` trata cualquier mazo no importado
+    // por sus `sourceTextIds`, así que un `kind:"filter"` también contaría.
+    for (const t of d.sourceTextIds ?? []) shared.add(t);
+  }
+  const ownTexts = new Set((deck.sourceTextIds ?? []).filter((t) => !shared.has(t)));
+
   const mine = new Set(
     sources
-      .filter((s) => belongsToDeck(s, deck))
+      .filter((s) => {
+        if (!belongsToDeck(s, deck)) return false;
+        // Una fila con `deckId` pertenece a un mazo importado por definición. Un
+        // mazo no importado no puede reclamarla: si lo hiciera, borrar este
+        // borraría las palabras de aquel. Sólo un backup restaurado a mano puede
+        // producir una fila así — `importFromFile` no valida nada.
+        if (s.deckId !== undefined) return deck.kind === "import";
+        // Fila de transcripción: sólo si es nuestra en exclusiva.
+        //
+        // Y aquí está la costura crítica: si la transcripción se comparte,
+        // `mine` tiene que quedar VACÍA para ese texto. No basta con saltarse
+        // el `delete` más abajo, porque `mine` también decide qué palabras
+        // quedan huérfanas — y un `mine` poblado volvería huérfanas las del
+        // otro mazo, que es justo lo que hay que evitar.
+        return ownTexts.has(s.sourceTextId ?? -1);
+      })
       .flatMap((s) => (s.id === undefined ? [] : [s.id])),
   );
 
@@ -86,10 +122,6 @@ export async function deleteDeck(deck: Deck): Promise<{ words: number; kept: num
     }
   }
 
-  // TODO en una transacción. Con dos, un fallo entre medias dejaba el mazo
-  // borrado y las palabras huérfanas para siempre — el mismo bug que motivationsó
-  // este módulo, pero sólo bajo fallo, que es la forma que no se reproduce a
-  // mano.
   await db.transaction("rw", db.tables, async () => {
     await db.sources
       .where("id")
@@ -97,8 +129,33 @@ export async function deleteDeck(deck: Deck): Promise<{ words: number; kept: num
       .delete();
     await db.decks.delete(deck.id!);
     await cascade(doomed);
+    for (const t of ownTexts) await db.sourceTexts.delete(t);
   });
   scheduleAutoSave();
 
-  return { words: doomed.length, kept };
+  return { words: doomed.length, kept, texts: ownTexts.size, shared: shared.size };
+}
+
+/**
+ * Borra transcripciones que ningún mazo reclama.
+ *
+ * NO hace cascada a las palabras, a propósito: borraría `reviewLog` —historial
+ * de estudio— por una operación de limpieza de disco que el usuario no pidió, y
+ * contradice la doctrina de `deleteDeck`, donde la marca `known` sobrevive al
+ * borrado del mazo. Las palabras se quedan: pasan a mostrar "sin mazo", que es
+ * distinto de "sin origen" pero no es pérdida de datos.
+ */
+export async function purgeOrphanTexts(): Promise<number> {
+  const referenced = new Set<number>();
+  for (const d of await db.decks.toArray()) {
+    for (const t of d.sourceTextIds ?? []) referenced.add(t);
+  }
+  const orphans = (await db.sourceTexts.toArray()).filter((t) => !referenced.has(t.id!));
+  if (!orphans.length) return 0;
+
+  await db.transaction("rw", db.sourceTexts, async () => {
+    for (const t of orphans) await db.sourceTexts.delete(t.id!);
+  });
+  scheduleAutoSave();
+  return orphans.length;
 }

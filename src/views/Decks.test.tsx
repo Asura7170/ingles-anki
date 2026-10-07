@@ -272,7 +272,7 @@ describe("borrar", () => {
     // esta espera el test probaría el estado de carga y no el de borrado.
     await screen.findByText(/3 palabras/);
     fireEvent.click(screen.getByRole("button", { name: "Borrar" }));
-    expect(screen.getByRole("button", { name: "¿Seguro? Borrar mazo y 3 palabras" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "¿Seguro? Borrar mazo, 3 palabras" })).toBeTruthy();
   });
 
   it("no cuenta como eliminables las palabras marcadas como conocidas", async () => {
@@ -283,7 +283,39 @@ describe("borrar", () => {
     await screen.findByText(/3 palabras/);
     fireEvent.click(screen.getByRole("button", { name: "Borrar" }));
     // Es un máximo, no una promesa: las compartidas con otro mazo sobreviven.
-    expect(screen.getByRole("button", { name: "¿Seguro? Borrar mazo y 2 palabras" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "¿Seguro? Borrar mazo, 2 palabras" })).toBeTruthy();
+  });
+
+  it("la confirmación nombra la transcripción sólo si el mazo tiene una", async () => {
+    // Nombrarla en un mazo importado sería mentir: no tiene transcripción.
+    await seedDeck("A", ["a1", "a2"]);
+    render(<Decks />);
+    await screen.findByText(/2 palabras/);
+    fireEvent.click(screen.getByRole("button", { name: "Borrar" }));
+    expect(screen.getByRole("button", { name: "¿Seguro? Borrar mazo, 2 palabras" })).toBeTruthy();
+  });
+
+  it("un mazo generado nombra la transcripción: es texto que no queda en el backup", async () => {
+    const sourceTextId = (await db.sourceTexts.add({
+      kind: "text",
+      title: "Ch. 1",
+      body: "a1 a2",
+      importedAt: NOW,
+    }))!;
+    await ingest(["a1", "a2"].map(item), { kind: "text", priority: 20, sourceTextId });
+    await db.decks.add({
+      name: "T",
+      kind: "generated",
+      sourceTextIds: [sourceTextId],
+      createdAt: NOW,
+    });
+    render(<Decks />);
+
+    await screen.findByText(/2 palabras/);
+    fireEvent.click(screen.getByRole("button", { name: "Borrar" }));
+    expect(
+      screen.getByRole("button", { name: "¿Seguro? Borrar mazo, 2 palabras y la transcripción" }),
+    ).toBeTruthy();
   });
 
   it("sin palabras que borrar, la confirmación no inventa un número", async () => {

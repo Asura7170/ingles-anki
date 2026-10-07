@@ -10,6 +10,7 @@ import {
   linkBackupFile,
   regrantBackup,
 } from "../backup";
+import { purgeOrphanTexts } from "../purge";
 
 const TARGET_LANGS = ["español", "inglés", "francés", "portugués", "alemán", "italiano", "japonés"];
 const TTS_LANGS = ["en-US", "en-GB", "en-AU", "en-IN"];
@@ -227,6 +228,34 @@ export default function Settings() {
               Almacenamiento: {mb(quota.usage)} de {mb(quota.quota)}
             </p>
           ) : null}
+        </section>
+
+        {/* Sección propia y no dentro de "Respaldo": restaurar *sobrescribe* todo
+            y limpiar *borra* filas. Juntarlos mezcla dos operaciones con
+            consecuencias opuestas. */}
+        <section className="panel" style={{ padding: 16, display: "grid", gap: 12 }}>
+          <h2 style={{ margin: 0 }}>Limpieza</h2>
+          <p className="small muted" style={{ margin: 0 }}>
+            Cada vez que se pegaba una transcripción quedaba guardada, y <code>sourceTexts</code> no
+            tiene ninguna pantalla donde verla. Borrar un mazo ya se lleva la suya; esto quita las
+            que sobraron de antes.
+          </p>
+          <div>
+            <button
+              className="btn"
+              onClick={() =>
+                void purgeOrphanTexts().then((n) =>
+                  notify(
+                    n
+                      ? `${n} transcripción${n === 1 ? "" : "es"} borrada${n === 1 ? "" : "s"}. Sus palabras NO se borran: quedan sin mazo.`
+                      : "No hay transcripciones huérfanas.",
+                  ),
+                )
+              }
+            >
+              Borrar transcripciones huérfanas
+            </button>
+          </div>
         </section>
       </div>
     </>

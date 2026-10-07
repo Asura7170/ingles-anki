@@ -443,7 +443,7 @@ input[type="range"] {
 
 .trow {
   display: grid;
-  grid-template-columns: 22px minmax(120px, 1.3fr) minmax(140px, 2fr) 74px 62px 92px;
+  grid-template-columns: 22px 22px minmax(120px, 1.3fr) minmax(140px, 2fr) 74px 62px 92px;
   gap: 10px;
   align-items: center;
   padding: 6px 12px;

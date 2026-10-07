@@ -1,4 +1,4 @@
-import { db, type Deck, type Example, type Node } from "./db";
+import { db, type Deck, type Example, type Node, type Source } from "./db";
 import { retrievability } from "./srs";
 
 /** Un deck es una query sobre el pool de nodos. Nunca contiene cards. */
@@ -9,16 +9,23 @@ export interface StudyItem {
   sentence?: string;
 }
 
+/**
+ * ¿De qué mazo es esta palabra? Un mazo importado se localiza por `deckId`; uno
+ * generado, por el `sourceTextId` que guarda en `sourceTextIds`. Exportado para
+ * que el borrado use el mismo criterio que la lectura: duplicar esta regla era
+ * la forma más corta de que "borrar un mazo" no encontrara sus propias palabras.
+ */
+export function belongsToDeck(source: Source, deck: Deck): boolean {
+  if (deck.kind === "import") return source.deckId === deck.id;
+  if (deck.sourceTextIds?.length) {
+    return source.sourceTextId != null && deck.sourceTextIds.includes(source.sourceTextId);
+  }
+  return false;
+}
+
 export async function deckNodeIds(deck: Deck): Promise<number[]> {
   const sources = await db.sources.toArray();
-  const relevant = sources.filter((s) => {
-    if (deck.kind === "import") return s.deckId === deck.id;
-    if (deck.sourceTextIds?.length) {
-      return s.sourceTextId != null && deck.sourceTextIds.includes(s.sourceTextId);
-    }
-    return false;
-  });
-  return [...new Set(relevant.map((s) => s.nodeId))];
+  return [...new Set(sources.filter((s) => belongsToDeck(s, deck)).map((s) => s.nodeId))];
 }
 
 export interface DeckStats {

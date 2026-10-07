@@ -248,13 +248,13 @@ describe("borrar", () => {
     expect(await db.decks.get(id)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar" }));
-    await waitFor(() =>
-      expect(screen.queryByRole("button", { name: "¿Seguro? Borrar" })).toBeNull(),
-    );
-    expect(await db.decks.get(id)).toBeUndefined();
+    // El botón se esconde al pulsar; el borrado real termina después, en la
+    // transacción. Por eso la aserción va sobre la base, no sobre la UI.
+    await waitFor(async () => expect(await db.decks.get(id)).toBeUndefined());
+    expect(screen.queryByRole("button", { name: "¿Seguro? Borrar" })).toBeNull();
   });
 
-  it("NO toca las palabras: el SRS vive en el nodo", async () => {
+  it("se lleva las palabras que le quedaban huérfanas", async () => {
     await seedDeck("A", ["run", "study", "child"]);
     render(<Decks />);
 
@@ -262,10 +262,26 @@ describe("borrar", () => {
     fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar" }));
 
     await waitFor(async () => expect(await db.decks.count()).toBe(0));
-    // Ésta es la aserción que importa. Si borrar metiera mano en `nodes`, el
-    // usuario perdería el progreso de repaso de tres palabras.
-    expect(await db.nodes.count()).toBe(3);
-    expect(await db.nodes.where("lemma").equals("run").first()).toBeTruthy();
+    // Sin `sources` no hay mazo al que pertenecer, y una palabra sin mazo no se
+    // puede estudar: se queda inaccesible. La regla de huérfanos está en
+    // `purge.test.ts`; aquí sólo se comprueba que la UI la dispara.
+    expect(await db.nodes.count()).toBe(0);
+    expect(await db.senses.count()).toBe(0);
+  });
+
+  it("NO toca las palabras marcadas como conocidas", async () => {
+    await seedDeck("A", ["run", "study"]);
+    await db.nodes.update(1, { known: 1 });
+    render(<Decks />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Borrar" }));
+    fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar" }));
+
+    await waitFor(async () => expect(await db.decks.count()).toBe(0));
+    // La marca es un hecho sobre la persona, no sobre el import: sobrevive al mazo.
+    const left = await db.nodes.toArray();
+    expect(left).toHaveLength(1);
+    expect(left[0]!.known).toBe(1);
   });
 
   it("limpia las filas de sources que lo vinculaban", async () => {
@@ -278,6 +294,22 @@ describe("borrar", () => {
 
     // Sin esto, `sources` acumularía referencias a un mazo inexistente.
     await waitFor(async () => expect(await db.sources.count()).toBe(0));
+  });
+
+  it("el aviso dice cuántas palabras se fueron y cuántas se quedaron", async () => {
+    await seedDeck("A", ["a1", "a2", "a3"]);
+    await db.nodes.update(1, { known: 1 });
+    render(<Decks />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Borrar" }));
+    fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar" }));
+
+    // El aviso sale al terminar la transacción, no al pulsar.
+    await waitFor(() =>
+      expect(useApp.getState().toast).toBe(
+        "Mazo «A» borrado. 2 palabras eliminadas, 1 conservada por estar marcada.",
+      ),
+    );
   });
 
   it("deja el resto de mazos intacto", async () => {
@@ -297,14 +329,15 @@ describe("borrar", () => {
     expect((await db.decks.get(a))!.name).toBe("A");
   });
 
-  it("dice que las palabras siguen en la biblioteca", async () => {
+  it("no dice que las palabras siguen: ya no es verdad", async () => {
     await seedDeck("A", ["run"]);
     render(<Decks />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Borrar" }));
     fireEvent.click(screen.getByRole("button", { name: "¿Seguro? Borrar" }));
 
-    await waitFor(() => expect(useApp.getState().toast).toMatch(/siguen en la biblioteca/));
+    await waitFor(() => expect(useApp.getState().toast).toContain("Mazo «A» borrado."));
+    expect(useApp.getState().toast).not.toMatch(/siguen en la biblioteca/);
   });
 });
 

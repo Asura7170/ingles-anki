@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, type Deck } from "../db";
 import { deckStats, type DeckStats } from "../decks";
+import { deleteDeck } from "../purge";
 import { useApp } from "../store";
 
 export default function Decks() {
@@ -119,7 +120,7 @@ function DeckCard({
                 className="btn"
                 onClick={() => {
                   setConfirming(false);
-                  void deleteDeck(deck, notify);
+                  void removeDeck(deck, notify);
                 }}
               >
                 ¿Seguro? Borrar
@@ -144,16 +145,18 @@ function DeckCard({
 }
 
 /**
- * Borrar un mazo no toca ni una palabra: sólo se va la fila de `decks` y sus
- * filas en `sources`, que son las que lo vinculan a los nodos. El SRS vive en
- * el nodo, así que las palabras quedan intactas y el mazo se puede reimportar.
+ * El borrado vive en `purge.ts`, no aquí: la cascada de huérfanos la necesita
+ * también la pestaña Palabras, y en un componente no se puede probar sin DOM.
  */
-async function deleteDeck(deck: Deck, notify: (msg: string) => void): Promise<void> {
-  await db.transaction("rw", db.decks, db.sources, async () => {
-    await db.sources.where("deckId").equals(deck.id!).delete();
-    await db.decks.delete(deck.id!);
-  });
-  notify(`Mazo «${deck.name}» borrado. Las palabras siguen en la biblioteca.`);
+async function removeDeck(deck: Deck, notify: (msg: string) => void): Promise<void> {
+  const { words, kept } = await deleteDeck(deck);
+  notify(
+    `Mazo «${deck.name}» borrado.` +
+      (words || kept
+        ? ` ${words} palabra${words === 1 ? "" : "s"} eliminada${words === 1 ? "" : "s"}` +
+          (kept ? `, ${kept} conservada${kept === 1 ? "" : "s"} por estar marcada.` : ".")
+        : ""),
+  );
 }
 
 function RenameField({

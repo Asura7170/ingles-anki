@@ -18,3 +18,22 @@ afterEach(() => cleanup());
 if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
+
+// Tampoco hay layout, así que todo elemento mide 0. `useVirtualizer` de
+// `Words` mide su contenedor para decidir cuántas filas pintar, y con 0 pinta
+// ninguna: la tabla entera desaparecería del DOM en el test sin que nadie lo
+// note. Se le da un alto plausible para que virtualice de verdad.
+if (typeof HTMLElement !== "undefined") {
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+    configurable: true,
+    get() {
+      return this.classList.contains("table") || this.style.overflowY === "auto" ? 600 : 0;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get() {
+      return this.clientHeight;
+    },
+  });
+}

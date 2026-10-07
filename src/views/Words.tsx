@@ -3,6 +3,7 @@ import { useLiveQuery } from "dexie-react-hooks";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { db, type Node } from "../db";
 import { useApp } from "../store";
+import { deleteWords } from "../purge";
 import { scheduleAutoSave } from "../backup";
 import { retrievability } from "../srs";
 
@@ -13,6 +14,8 @@ export default function Words() {
   const [sort, setSort] = useState<Sort>("due");
   const [onlyUnknown, setOnlyUnknown] = useState(false);
   const [target, setTarget] = useState<Node | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const notify = useApp((s) => s.notify);
 
   const nodes = useLiveQuery(() => db.nodes.toArray(), []) ?? [];
   const senses = useLiveQuery(() => db.senses.toArray(), []) ?? [];
@@ -42,6 +45,7 @@ export default function Words() {
     return filtered.sort(cmp[sort]);
   }, [nodes, query, sort, onlyUnknown, translations]);
 
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const parent = useRef<HTMLDivElement>(null);
   const virtual = useVirtualizer({
     count: rows.length,
@@ -53,6 +57,43 @@ export default function Words() {
   const toggleKnown = async (node: Node) => {
     await db.nodes.update(node.id!, { known: node.known ? 0 : 1, updatedAt: Date.now() });
     scheduleAutoSave();
+  };
+
+  // Sólo se puede seleccionar lo que se ve. Sin esto, filtrar dejaría ids
+  // seleccionados fuera de pantalla y "borrar N" surprise-borraría lo invisible.
+  const visibleIds = rows.map((n) => n.id!).filter((id) => id !== undefined);
+  const shownSelected = visibleIds.filter((id) => selected.has(id));
+
+  const allSelected = visibleIds.length > 0 && shownSelected.length === visibleIds.length;
+
+  // `indeterminate` es propiedad DOM, no atributo: sin esto, con 3 de 500
+  // seleccionadas la casilla del encabezado se ve vacía y un clic borra 500.
+  const allRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (allRef.current) {
+      allRef.current.indeterminate = shownSelected.length > 0 && !allSelected;
+    }
+  }, [shownSelected.length, allSelected]);
+
+  const toggleAll = () => {
+    setSelected(allSelected ? new Set() : new Set(visibleIds));
+  };
+
+  const toggleOne = (id: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const removeSelected = async () => {
+    const ids = [...selected];
+    setSelected(new Set());
+    await deleteWords(ids);
+    notify(
+      `${ids.length} palabra${ids.length === 1 ? "" : "s"} eliminada${ids.length === 1 ? "" : "s"}.`,
+    );
   };
 
   return (
@@ -76,6 +117,35 @@ export default function Words() {
           sólo lo que no sé
         </label>
         <div className="grow" />
+        {shownSelected.length > 0 ? (
+          <>
+            {/* Un solo nodo de texto: con `{n} seleccionadas` React crea dos y
+                `getByText("3 seleccionadas")` deja de encontrarlo. */}
+            <span className="muted small" style={{ fontVariantNumeric: "tabular-nums" }}>
+              {`${shownSelected.length} seleccionadas`}
+            </span>
+            {confirmDelete ? (
+              <>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    setConfirmDelete(false);
+                    void removeSelected();
+                  }}
+                >
+                  ¿Seguro? Borrar {shownSelected.length}
+                </button>
+                <button className="btn" onClick={() => setConfirmDelete(false)}>
+                  Cancelar
+                </button>
+              </>
+            ) : (
+              <button className="btn" onClick={() => setConfirmDelete(true)}>
+                Borrar seleccionadas
+              </button>
+            )}
+          </>
+        ) : null}
         <select
           value={sort}
           onChange={(e) => setSort(e.target.value as Sort)}
@@ -93,6 +163,14 @@ export default function Words() {
 
       <div className="content table">
         <div className="trow thead">
+          <input
+            ref={allRef}
+            type="checkbox"
+            checked={allSelected}
+            onChange={toggleAll}
+            aria-label="Seleccionar todas las palabras visibles"
+            style={{ accentColor: "var(--accent)" }}
+          />
           <span />
           <span>Término</span>
           <span>Traducción</span>
@@ -118,6 +196,13 @@ export default function Words() {
                     transform: `translateY(${v.start}px)`,
                   }}
                 >
+                  <input
+                    type="checkbox"
+                    checked={selected.has(node.id!)}
+                    onChange={() => toggleOne(node.id!)}
+                    aria-label={`Seleccionar ${node.lemma}`}
+                    style={{ accentColor: "var(--accent)" }}
+                  />
                   <input
                     type="checkbox"
                     checked={node.known === 1}
@@ -153,7 +238,21 @@ export default function Words() {
         </div>
       </div>
 
-      {target ? <NodeDialog node={target} onClose={() => setTarget(null)} /> : null}
+      {target ? (
+        <NodeDialog
+          node={target}
+          onClose={() => setTarget(null)}
+          onDeleted={() => {
+            setTarget(null);
+            setSelected((prev) => {
+              if (!target.id || !prev.has(target.id)) return prev;
+              const next = new Set(prev);
+              next.delete(target.id);
+              return next;
+            });
+          }}
+        />
+      ) : null}
     </>
   );
 }
@@ -168,8 +267,17 @@ function rLabel(node: Node): string {
  * "sólo que aparezca") sólo se puede comprobar pulsando los botones de verdad, y
  * también necesita `dialog.showModal()`, que jsdom no implementa.
  */
-export function NodeDialog({ node, onClose }: { node: Node; onClose: () => void }) {
+export function NodeDialog({
+  node,
+  onClose,
+  onDeleted,
+}: {
+  node: Node;
+  onClose: () => void;
+  onDeleted?: () => void;
+}) {
   const unmark = useApp((s) => s.unmark);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const ref = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
@@ -244,6 +352,32 @@ export function NodeDialog({ node, onClose }: { node: Node; onClose: () => void 
         <p className="small muted" style={{ marginBottom: 0 }}>
           Al marcarla como conocida desaparece de la generación de mazos y de las sesiones.
         </p>
+      )}
+
+      <hr style={{ border: "none", borderTop: "1px solid var(--line)", margin: "16px 0 12px" }} />
+      {confirmDelete ? (
+        <div className="grid" style={{ gap: 10 }}>
+          <p className="small" style={{ margin: 0 }}>
+            Se borra la palabra y su historial de repaso. No hay forma de deshacerlo.
+          </p>
+          <button
+            className="btn primary"
+            onClick={() => {
+              setConfirmDelete(false);
+              void deleteWords([node.id!]);
+              onDeleted?.();
+            }}
+          >
+            ¿Seguro? Borrar «{node.lemma}»
+          </button>
+          <button className="btn" onClick={() => setConfirmDelete(false)}>
+            Cancelar
+          </button>
+        </div>
+      ) : (
+        <button className="btn" onClick={() => setConfirmDelete(true)}>
+          Borrar palabra
+        </button>
       )}
     </dialog>
   );

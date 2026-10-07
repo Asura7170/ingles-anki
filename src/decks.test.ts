@@ -4,6 +4,7 @@ import { IDBFactory } from "fake-indexeddb";
 import { db } from "./db";
 import { ingest, markSourceKnown, type IngestItem } from "./ingest";
 import { buildQueue, deckNodeIds, deckStats, type StudyItem } from "./decks";
+import { deleteDeck } from "./purge";
 import { review, retrievability, newCard } from "./srs";
 
 /**
@@ -277,19 +278,23 @@ describe("el SRS es global, no por deck", () => {
 });
 
 describe("aislar un mazo no destruye progreso", () => {
-  it("borrar el deck deja la palabra con su historial intacto", async () => {
-    const deckId = await seedDeck("A", ["run"]);
+  // Esta regla cambió: borrar un mazo borra sus palabras huérfanas. El SRS sigue
+  // siendo global —lo que se conserva es la palabra compartida, no la del mazo
+  // que se borra— pero "aislar un mazo" ya no es dejar la palabra intacta.
+  // La cobertura de la regla nueva está en `purge.test.ts`.
+  it("la palabra de otro mazo conserva su historial al borrar uno de los suyos", async () => {
+    const a = await seedDeck("A", ["run"]);
+    const b = await seedDeck("B", ["run"]);
     const node = (await db.nodes.where("lemma").equals("run").first())!;
     const card = review(node.card, 3, NOW);
     await db.nodes.update(node.id!, { card, due: card.due.getTime() });
 
-    await db.transaction("rw", db.decks, db.sources, async () => {
-      await db.sources.where("deckId").equals(deckId).delete();
-      await db.decks.delete(deckId);
-    });
+    await deleteDeck({ name: "A", kind: "import", createdAt: NOW, id: a });
 
+    // Sigue viva porque B también la tiene: un solo nodo, un solo historial.
     const after = await db.nodes.where("lemma").equals("run").first();
     expect(after!.card!.reps).toBe(1);
     expect(after!.due).toBe(card.due.getTime());
+    expect(await db.sources.filter((s) => s.deckId === b).count()).toBe(1);
   });
 });

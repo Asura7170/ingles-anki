@@ -14,6 +14,8 @@ import { review, retrievability, newCard } from "./srs";
 
 const NOW = Date.UTC(2026, 0, 15);
 const day = 86_400_000;
+/** Límite de nuevas holgado: estos tests miran el contenido, no el recorte. */
+const LIM = 20;
 
 const item = (lemma: string, extra: Partial<IngestItem> = {}): IngestItem => ({
   headword: lemma,
@@ -124,15 +126,7 @@ describe("deckStats", () => {
 describe("buildQueue — el límite de nuevas NO toca el SRS", () => {
   it("descarta las nuevas por encima del límite pero no las marca como repasadas", async () => {
     const deckId = await seedDeck("A", ["a1", "b1", "c1"]);
-    const deck = {
-      name: "A",
-      kind: "import" as const,
-      createdAt: NOW,
-      id: deckId,
-      dailyNewLimit: 2,
-    };
-
-    const q = await buildQueue(deck);
+    const q = await buildQueue({ name: "A", kind: "import", createdAt: NOW, id: deckId }, 2, NOW);
     expect(q).toHaveLength(2);
 
     // La tercera sigue nueva: no se consumió un repaso por haberla limitado.
@@ -145,13 +139,7 @@ describe("buildQueue — el límite de nuevas NO toca el SRS", () => {
     const a = (await db.nodes.where("lemma").equals("a1").first())!;
     await db.nodes.update(a.id!, { card: review(a.card, 3, NOW), due: NOW - 1 });
 
-    const q = await buildQueue({
-      name: "A",
-      kind: "import" as const,
-      createdAt: NOW,
-      id: deckId,
-      dailyNewLimit: 1,
-    });
+    const q = await buildQueue({ name: "A", kind: "import", createdAt: NOW, id: deckId }, 1, NOW);
     expect(q.map((i) => i.node.lemma)).toContain("a1");
   });
 });
@@ -161,7 +149,10 @@ describe("buildQueue — las palabras conocidas no entran", () => {
     const deckId = await seedDeck("A", ["run", "study"]);
     await markSourceKnown((s) => s.deckId === deckId && s.noteId === 1);
 
-    const q = await buildQueue({ name: "A", kind: "import" as const, createdAt: NOW, id: deckId });
+    const q = await buildQueue(
+      { name: "A", kind: "import" as const, createdAt: NOW, id: deckId },
+      LIM,
+    );
     expect(q.map((i) => i.node.lemma)).toEqual(["study"]);
   });
 });
@@ -185,7 +176,10 @@ describe("buildQueue — orden por retrievability", () => {
 
     expect(retrievability(fCard, NOW)).toBeLessThan(retrievability(sCard, NOW));
 
-    const q = await buildQueue({ name: "A", kind: "import" as const, createdAt: NOW, id: deckId });
+    const q = await buildQueue(
+      { name: "A", kind: "import" as const, createdAt: NOW, id: deckId },
+      LIM,
+    );
     const order = q.map((i) => i.node.lemma);
     expect(order.indexOf("frail")).toBeLessThan(order.indexOf("solid"));
   });
@@ -203,7 +197,10 @@ describe("buildQueue — orden por retrievability", () => {
     const due = (await db.nodes.where("lemma").equals("due1").first())!;
     await db.nodes.update(due.id!, { card: review(due.card, 3, NOW), due: NOW - day });
 
-    const q = await buildQueue({ name: "A", kind: "import" as const, createdAt: NOW, id: deckId });
+    const q = await buildQueue(
+      { name: "A", kind: "import" as const, createdAt: NOW, id: deckId },
+      LIM,
+    );
     expect(q.map((i) => i.node.lemma)).toEqual(["due1", "new1"]);
   });
 });
@@ -221,18 +218,19 @@ describe("buildQueue — la frase más corta acompaña a la palabra", () => {
       { nodeId: node.id!, text: "They ran.", sourceId: null },
     ]);
 
-    const q: StudyItem[] = await buildQueue({
-      name: "A",
-      kind: "import" as const,
-      createdAt: NOW,
-      id: deckId,
-    });
+    const q: StudyItem[] = await buildQueue(
+      { name: "A", kind: "import", createdAt: NOW, id: deckId },
+      LIM,
+    );
     expect(q[0]!.sentence).toBe("They ran.");
   });
 
   it("palabra sin ejemplo → sentence undefined, no crash", async () => {
     const deckId = await seedDeck("A", ["run"]);
-    const q = await buildQueue({ name: "A", kind: "import" as const, createdAt: NOW, id: deckId });
+    const q = await buildQueue(
+      { name: "A", kind: "import" as const, createdAt: NOW, id: deckId },
+      LIM,
+    );
     expect(q[0]!.sentence).toBeUndefined();
   });
 });
@@ -251,7 +249,10 @@ describe("el SRS es global, no por deck", () => {
     expect(await db.sources.filter((s) => s.deckId === a || s.deckId === b).count()).toBe(2);
 
     // Estudiar en A actualiza el nodo, y B ve exactamente ese mismo historial.
-    const inB = await buildQueue({ name: "B", kind: "import" as const, createdAt: NOW, id: b });
+    const inB = await buildQueue(
+      { name: "B", kind: "import" as const, createdAt: NOW, id: b },
+      LIM,
+    );
     expect(inB.map((i) => i.node.lemma)).toEqual(["run"]);
     expect(inB[0]!.node.card!.reps).toBe(1);
     expect(retrievability(inB[0]!.node.card, now())).toBeGreaterThan(0);
@@ -267,10 +268,10 @@ describe("el SRS es global, no por deck", () => {
     await db.nodes.update(node.id!, { card, due: card.due.getTime() });
 
     expect(
-      await buildQueue({ name: "A", kind: "import" as const, createdAt: NOW, id: a }),
+      await buildQueue({ name: "A", kind: "import" as const, createdAt: NOW, id: a }, LIM),
     ).toHaveLength(0);
     expect(
-      await buildQueue({ name: "B", kind: "import" as const, createdAt: NOW, id: b }),
+      await buildQueue({ name: "B", kind: "import" as const, createdAt: NOW, id: b }, LIM),
     ).toHaveLength(0);
   });
 });

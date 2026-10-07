@@ -97,7 +97,7 @@ export const useApp = create<AppState>((set, get) => ({
   async startSession(deck) {
     set({ busy: "Preparando sesión…" });
     try {
-      const queue = await buildQueue({ ...deck, dailyNewLimit: get().prefs.dailyNewLimit });
+      const queue = await buildQueue(deck, get().prefs.dailyNewLimit);
       if (!queue.length) {
         get().notify("No hay palabras pendientes en este mazo.");
         return;

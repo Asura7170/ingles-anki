@@ -1,12 +1,23 @@
+import { useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
-import { db } from "../db";
-import { deckStats, DEFAULT_DAILY_NEW_LIMIT, type DeckStats } from "../decks";
+import { db, type Deck } from "../db";
+import { deckStats, type DeckStats } from "../decks";
 import { useApp } from "../store";
 
 export default function Decks() {
-  const decks = useLiveQuery(() => db.decks.toArray(), []) ?? [];
+  // `createdAt` desc, no el orden de `++id`: los mazos se reimportan y el que
+  // acabas de traer es el que vas a estudiar. `toArray` + sort en vez de
+  // `orderBy` porque `createdAt` no está indexado y la tabla es de un puñado.
+  const decks =
+    useLiveQuery(async () => {
+      const rows = await db.decks.toArray();
+      return rows.sort((a, b) => b.createdAt - a.createdAt);
+    }, []) ?? [];
   const startSession = useApp((s) => s.startSession);
   const busy = useApp((s) => s.busy);
+  const [filter, setFilter] = useState("");
+
+  const shown = decks.filter((d) => d.name.toLowerCase().includes(filter.trim().toLowerCase()));
 
   return (
     <>
@@ -26,11 +37,32 @@ export default function Decks() {
             </p>
           </div>
         ) : (
-          <div className="grid cols-2">
-            {decks.map((deck) => (
-              <DeckCard key={deck.id} deck={deck} onStart={startSession} disabled={Boolean(busy)} />
-            ))}
-          </div>
+          <>
+            {decks.length > 3 ? (
+              <input
+                type="text"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="Filtrar mazos por nombre"
+                aria-label="Filtrar mazos por nombre"
+                style={{ maxWidth: 320 }}
+              />
+            ) : null}
+            {shown.length === 0 ? (
+              <p className="muted">Ningún mazo se llama «{filter.trim()}».</p>
+            ) : (
+              <div className="grid cols-2">
+                {shown.map((deck) => (
+                  <DeckCard
+                    key={deck.id}
+                    deck={deck}
+                    onStart={startSession}
+                    disabled={Boolean(busy)}
+                  />
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
     </>
@@ -42,19 +74,30 @@ function DeckCard({
   onStart,
   disabled,
 }: {
-  deck: import("../db").Deck;
-  onStart: (deck: import("../db").Deck) => void;
+  deck: Deck;
+  onStart: (deck: Deck) => void;
   disabled: boolean;
 }) {
   const stats = useLiveQuery<DeckStats>(() => deckStats(deck), [deck.id, deck.name, deck.kind]);
-  const pending =
-    (stats?.due ?? 0) + Math.min(stats?.fresh ?? 0, deck.dailyNewLimit ?? DEFAULT_DAILY_NEW_LIMIT);
+  // La misma fuente que `startSession` pasa a `buildQueue`. Antes la tarjeta
+  // contaba con `deck.dailyNewLimit` (que nadie rellenaba) y el store usaba
+  // `prefs.dailyNewLimit`: el botón prometía una cola distinta de la que llegaba.
+  const newLimit = useApp((s) => s.prefs.dailyNewLimit);
+  const notify = useApp((s) => s.notify);
+  const [editing, setEditing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+
+  const pending = (stats?.due ?? 0) + Math.min(stats?.fresh ?? 0, newLimit);
 
   return (
     <div className="panel">
       <div className="row" style={{ padding: "12px 14px" }}>
         <div className="grow">
-          <div style={{ fontWeight: 550 }}>{deck.name}</div>
+          {editing ? (
+            <RenameField deck={deck} onDone={() => setEditing(false)} onNotify={notify} />
+          ) : (
+            <div style={{ fontWeight: 550 }}>{deck.name}</div>
+          )}
           <div className="muted small">
             {stats ? `${stats.total} palabras · ${stats.known} conocidas` : "calculando…"}
           </div>
@@ -66,6 +109,28 @@ function DeckCard({
         <Stat label="Nuevas" value={stats?.fresh ?? 0} />
         <Stat label="En curso" value={stats?.learning ?? 0} />
         <div className="grow" />
+        {editing ? null : (
+          <>
+            <button className="btn" onClick={() => setEditing(true)} disabled={disabled}>
+              Renombrar
+            </button>
+            {confirming ? (
+              <button
+                className="btn"
+                onClick={() => {
+                  setConfirming(false);
+                  void deleteDeck(deck, notify);
+                }}
+              >
+                ¿Seguro? Borrar
+              </button>
+            ) : (
+              <button className="btn" onClick={() => setConfirming(true)} disabled={disabled}>
+                Borrar
+              </button>
+            )}
+          </>
+        )}
         <button
           className="btn primary"
           disabled={disabled || pending === 0}
@@ -75,6 +140,56 @@ function DeckCard({
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * Borrar un mazo no toca ni una palabra: sólo se va la fila de `decks` y sus
+ * filas en `sources`, que son las que lo vinculan a los nodos. El SRS vive en
+ * el nodo, así que las palabras quedan intactas y el mazo se puede reimportar.
+ */
+async function deleteDeck(deck: Deck, notify: (msg: string) => void): Promise<void> {
+  await db.transaction("rw", db.decks, db.sources, async () => {
+    await db.sources.where("deckId").equals(deck.id!).delete();
+    await db.decks.delete(deck.id!);
+  });
+  notify(`Mazo «${deck.name}» borrado. Las palabras siguen en la biblioteca.`);
+}
+
+function RenameField({
+  deck,
+  onDone,
+  onNotify,
+}: {
+  deck: Deck;
+  onDone: () => void;
+  onNotify: (msg: string) => void;
+}) {
+  const [name, setName] = useState(deck.name);
+
+  const save = async () => {
+    const trimmed = name.trim();
+    // Nombre vacío = no hacer nada. Borrar el nombre dejaría un mazo sin
+    // identidad en la lista, y `db.decks` indexa `name`.
+    if (!trimmed || trimmed === deck.name) return onDone();
+    await db.decks.update(deck.id!, { name: trimmed });
+    onNotify(`Mazo renombrado a «${trimmed}».`);
+    onDone();
+  };
+
+  return (
+    <input
+      type="text"
+      value={name}
+      aria-label={`Nuevo nombre para ${deck.name}`}
+      autoFocus
+      onChange={(e) => setName(e.target.value)}
+      onBlur={() => void save()}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") void save();
+        if (e.key === "Escape") onDone();
+      }}
+    />
   );
 }
 

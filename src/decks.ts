@@ -32,9 +32,6 @@ export interface DeckStats {
 /** Una palabra es "nueva" si FSRS nunca la ha visto: sin card o en estado New. */
 const isNew = (n: Node) => !n.card || n.card.state === 0;
 
-/** Sin `dailyNewLimit` explícito, 20 nuevas por sesión. Lo ve también la UI. */
-export const DEFAULT_DAILY_NEW_LIMIT = 20;
-
 export async function deckStats(deck: Deck, now = Date.now()): Promise<DeckStats> {
   const ids = await deckNodeIds(deck);
   if (!ids.length) return { total: 0, known: 0, learning: 0, due: 0, fresh: 0 };
@@ -55,9 +52,18 @@ export async function deckStats(deck: Deck, now = Date.now()): Promise<DeckStats
 /**
  * Cola de sesión: repasos vencidos primero ordenados por retrievability
  * ascendente ("lo que más se me está olvidando"), después las nuevas limitadas
- * por `dailyNewLimit`. El límite NO toca el SRS: sólo difiere las nuevas.
+ * por `newLimit`. El límite NO toca el SRS: sólo difiere las nuevas.
+ *
+ * El límite viene como parámetro y no como campo del mazo a propósito: es una
+ * preferencia global (Ajustes), y leerlo de dos sitios fue un bug: la tarjeta
+ * contaba con `deck.dailyNewLimit` mientras `startSession` sobrescribía con
+ * `prefs.dailyNewLimit`, así que el botón prometía una cola que no llegaba.
  */
-export async function buildQueue(deck: Deck, now = Date.now()): Promise<StudyItem[]> {
+export async function buildQueue(
+  deck: Deck,
+  newLimit: number,
+  now = Date.now(),
+): Promise<StudyItem[]> {
   const ids = await deckNodeIds(deck);
   if (!ids.length) return [];
 
@@ -70,8 +76,7 @@ export async function buildQueue(deck: Deck, now = Date.now()): Promise<StudyIte
     .filter((n) => !isNew(n) && n.due <= now)
     .sort((a, b) => retrievability(a.card, now) - retrievability(b.card, now));
 
-  const limit = deck.dailyNewLimit ?? DEFAULT_DAILY_NEW_LIMIT;
-  const fresh = eligible.filter(isNew).slice(0, limit);
+  const fresh = eligible.filter(isNew).slice(0, newLimit);
   const queue = [...reviews, ...fresh];
 
   const rows = queue.length

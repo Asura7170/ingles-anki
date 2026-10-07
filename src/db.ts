@@ -113,7 +113,6 @@ export interface Deck {
   levels?: string[];
   sourceTextIds?: number[];
   wordKinds?: Kind[];
-  dailyNewLimit?: number;
   createdAt: number;
 }
 

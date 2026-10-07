@@ -36,6 +36,12 @@ function buildApkg(opts: {
   schema18?: boolean;
   /** JSON de col.decks roto, para el camino de degradación. */
   brokenDecksJson?: boolean;
+  /**
+   * `true` = layout v3 (Anki 23.10+): la real es `collection.anki21b`, y el
+   * exportador escribe además un `collection.anki2` DUMMY. Por defecto legacy:
+   * la real es `collection.anki2`.
+   */
+  v3?: boolean;
 }): Uint8Array {
   const db = new SQL.Database();
 
@@ -71,10 +77,30 @@ function buildApkg(opts: {
   }
 
   // `export()` antes de `close()`: una base cerrada devuelve un buffer vacío.
-  const exported = db.export();
+  const exported = new Uint8Array(db.export());
   db.close();
+
+  if (!opts.v3) {
+    return zipSync({ "collection.anki2": exported, media: new TextEncoder().encode("{}") });
+  }
+
+  // Layout v3: la real es anki21b y el anki2 es un dummy con una sola nota que
+  // dice "This file requires a newer version of Anki." — igual que hace
+  // `write_dummy_collection` en el exportador de Anki.
+  const dummy = new SQL.Database();
+  dummy.run(
+    `CREATE TABLE notes (id INTEGER PRIMARY KEY, nid INTEGER, mid INTEGER, mod INTEGER, usn INTEGER, tags TEXT, flds TEXT, sfld INTEGER, csum INTEGER, flags INTEGER, data TEXT)`,
+  );
+  dummy.run(`INSERT INTO notes (id, nid, mid, mod, usn, tags, flds) VALUES (1,1,1,0,0,'',?)`, [
+    ["", "This file requires a newer version of Anki."].join("\x1f"),
+  ]);
+  const dummyBytes = new Uint8Array(dummy.export());
+  dummy.close();
+
   return zipSync({
-    "collection.anki2": new Uint8Array(exported),
+    meta: new Uint8Array([0x08, 0x03]), // PackageMetadata{ version: 3 }
+    "collection.anki21b": exported,
+    "collection.anki2": dummyBytes,
     media: new TextEncoder().encode("{}"),
   });
 }
@@ -153,6 +179,27 @@ describe("el .apkg se parsea", () => {
 
   it("deck vacío → notes vacío, no error", () => {
     expect(parse(buildApkg({ notes: [] })).notes).toEqual([]);
+  });
+
+  // El bug. `DB_FILES` buscaba `collection.anki2` primero, y en un .apkg moderno
+  // ese nombre es el DUMMY que escribe el exportador: el mazo entero se
+  // importaba como una nota que dice "This file requires a newer version of
+  // Anki.". Un .apkg real habría delatado el orden; el fixture no lo tenía.
+  it("layout v3: lee anki21b, no el collection.anki2 dummy", () => {
+    const r = parse(buildApkg({ notes: SAMPLE, v3: true }));
+    expect(r.notes).toHaveLength(3);
+    expect(r.notes.map((n) => n.fields[0])).toEqual(["run", "study", "startle"]);
+    expect(r.notes.some((n) => n.fields.some((f) => f.includes("newer version")))).toBe(false);
+  });
+
+  it("layout v3 sin anki21b legible: el dummy no enmascara el error", () => {
+    // Sin la real, importa el dummy y no finge que el mazo está vacío.
+    const r = parse(buildApkg({ notes: SAMPLE, v3: true }));
+    expect(r.ok).toBe(true);
+    // Legacy sin ninguna base: el mensaje sigue nombrando lo que falta.
+    expect(() => parse(zipSync({ media: new TextEncoder().encode("{}") }))).toThrow(
+      /collection\.anki2/,
+    );
   });
 });
 

@@ -68,9 +68,19 @@ function buildCardDeck(q: <T>(sql: string) => T[]): Map<number, number> {
   return byNote;
 }
 
+/**
+ * La base real del mazo. `meta` es la discriminadora, no el orden de `DB_FILES`:
+ * desde Anki 23.10 el `.apkg` por defecto lleva `collection.anki21b` con los datos
+ * y **además** un `collection.anki2` dummy con una nota de aviso. Como `find`
+ * devuelve el primero que exista, el orden de `DB_FILES` solo elegía el dummy.
+ */
+function findCollection(files: Record<string, Uint8Array>): string | undefined {
+  return "meta" in files ? "collection.anki21b" : DB_FILES.find((k) => k in files);
+}
+
 export function parseApkgBytes(buffer: ArrayBuffer, SQL: SqlJsStatic): ApkgOut {
   const files = unzipSync(new Uint8Array(buffer));
-  const dbKey = DB_FILES.find((k) => k in files);
+  const dbKey = findCollection(files);
   if (!dbKey) throw new Error("El .apkg no contiene collection.anki2");
 
   let bytes = files[dbKey]!;

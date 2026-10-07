@@ -3,7 +3,7 @@ import { useLiveQuery } from "dexie-react-hooks";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { db, type Node } from "../db";
 import { useApp } from "../store";
-import { deleteWords } from "../purge";
+import { deleteWords, runDelete } from "../purge";
 import { scheduleAutoSave } from "../backup";
 import { retrievability } from "../srs";
 
@@ -113,8 +113,15 @@ export default function Words() {
     // Con `selected`, seleccionar 2 palabras, filtrar a 1 y confirmar "Borrar 1"
     // borraba las 2 — una se iba sin haber salido en el recuento.
     const ids = shownSelected;
+    // La selección se limpia DESPUÉS del borrado: antes, un fallo dejaba al
+    // usuario sin selección y sin aviso, con las palabras todavía ahí.
+    const ok = await runDelete(
+      () => deleteWords(ids),
+      "No se pudieron borrar las palabras",
+      notify,
+    );
+    if (ok === null) return;
     setSelected(new Set());
-    await deleteWords(ids);
     notify(
       `${ids.length} palabra${ids.length === 1 ? "" : "s"} eliminada${ids.length === 1 ? "" : "s"}.`,
     );
@@ -320,6 +327,7 @@ export function NodeDialog({
   onDeleted?: () => void;
 }) {
   const unmark = useApp((s) => s.unmark);
+  const notify = useApp((s) => s.notify);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const ref = useRef<HTMLDialogElement>(null);
 
@@ -407,8 +415,16 @@ export function NodeDialog({
             className="btn primary"
             onClick={() => {
               setConfirmDelete(false);
-              void deleteWords([node.id!]);
-              onDeleted?.();
+              // El diálogo se cierra sólo si el borrado se confirmó: cerrarlo
+              // siempre hacía desaparecer la fila de la selección y dejaba la
+              // palabra en la base sin avisar.
+              void runDelete(
+                () => deleteWords([node.id!]),
+                "No se pudo borrar la palabra",
+                notify,
+              ).then((ok) => {
+                if (ok !== null) onDeleted?.();
+              });
             }}
           >
             ¿Seguro? Borrar «{node.lemma}»

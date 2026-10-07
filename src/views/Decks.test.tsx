@@ -393,9 +393,12 @@ describe("borrar", () => {
 
     // Dos mazos, dos botones "Borrar": hay que elegir el panel correcto.
     // Con el orden `createdAt` desc, "B" (creado después) es el primero.
-    const newest = (await screen.findAllByRole("button", { name: "Borrar" }))[0]!;
-    fireEvent.click(newest);
-    fireEvent.click(within(newest.closest(".panel")!).getByRole("button", { name: CONFIRM }));
+    fireEvent.click((await screen.findAllByRole("button", { name: "Borrar" }))[0]!);
+    // El panel se busca por su nombre, no desde el botón pulsado: al confirmar,
+    // React desmonta el botón "Borrar" y lo reemplaza por el confirm, así que la
+    // referencia que tenemos queda huérfana del DOM.
+    const panel = (await screen.findByText("B")).closest(".panel") as HTMLElement;
+    fireEvent.click(within(panel).getByRole("button", { name: CONFIRM }));
 
     await waitFor(async () => expect(await db.decks.count()).toBe(1));
     expect((await db.decks.get(a))!.name).toBe("A");

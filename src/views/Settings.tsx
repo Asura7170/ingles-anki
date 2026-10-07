@@ -10,7 +10,7 @@ import {
   linkBackupFile,
   regrantBackup,
 } from "../backup";
-import { purgeOrphanTexts } from "../purge";
+import { purgeOrphanTexts, runDelete } from "../purge";
 
 const TARGET_LANGS = ["español", "inglés", "francés", "portugués", "alemán", "italiano", "japonés"];
 const TTS_LANGS = ["en-US", "en-GB", "en-AU", "en-IN"];
@@ -240,22 +240,26 @@ export default function Settings() {
             tiene ninguna pantalla donde verla. Borrar un mazo ya se lleva la suya; esto quita las
             que sobraron de antes.
           </p>
-          <div>
-            <button
-              className="btn"
-              onClick={() =>
-                void purgeOrphanTexts().then((n) =>
-                  notify(
-                    n
-                      ? `${n} transcripción${n === 1 ? "" : "es"} borrada${n === 1 ? "" : "s"}. Sus palabras NO se borran: quedan sin mazo.`
-                      : "No hay transcripciones huérfanas.",
-                  ),
-                )
-              }
-            >
-              Borrar transcripciones huérfanas
-            </button>
-          </div>
+          <button
+            className="btn"
+            onClick={() =>
+              void runDelete(
+                () => purgeOrphanTexts(),
+                "No se pudieron borrar las transcripciones",
+                notify,
+              ).then((n) =>
+                n === null
+                  ? null
+                  : notify(
+                      n
+                        ? `${n} transcripción${n === 1 ? "" : "es"} borrada${n === 1 ? "" : "s"}. Sus palabras NO se borran: quedan sin mazo.`
+                        : "No hay transcripciones huérfanas.",
+                    ),
+              )
+            }
+          >
+            Borrar transcripciones huérfanas
+          </button>
         </section>
       </div>
     </>

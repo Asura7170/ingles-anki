@@ -345,8 +345,14 @@ describe("la columna Origen", () => {
     await ingest([item("run")], { kind: "apkg", priority: 30, deckId, noteId: 1 });
     await renderList();
 
-    const cell = document.querySelectorAll(".trow:not(.thead) .tag")[0]!;
-    expect(cell.textContent).toBe("Verbos irregulares");
+    // Igual que el caso de la transcripción: `decks` es un `useLiveQuery`
+    // aparte de `nodes`, así que hay filas pintadas antes de que el nombre del
+    // mazo esté disponible y la celda dice «sin mazo».
+    await waitFor(() =>
+      expect(document.querySelector(".trow:not(.thead) .tag")!.textContent).toBe(
+        "Verbos irregulares",
+      ),
+    );
   });
 
   it("una palabra de una transcripción muestra el título", async () => {

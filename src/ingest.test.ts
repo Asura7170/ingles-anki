@@ -301,16 +301,16 @@ function lemmaOf(nodes: Node[]): string[] {
 void lemmaOf;
 
 /**
- * Reutilizar la transcripci?n al pegar dos veces el mismo texto.
+ * Reutilizar la transcripción al pegar dos veces el mismo texto.
  *
- * `sourceTexts` no tiene ninguna pantalla donde verse, as? que cada `add`
+ * `sourceTexts` no tiene ninguna pantalla donde verse, así que cada `add`
  * incondicional era una fila invisible. Y como borrar un mazo ya se lleva la
- * suya, la ?nica forma de que quedara basura era justo repetir la pegada.
+ * suya, la única forma de que quedara basura era justo repetir la pegada.
  */
 describe("findOrAddSourceText", () => {
   const TEXT = "The noise startled the horses.";
 
-  it("crea la transcripci?n la primera vez", async () => {
+  it("crea la transcripción la primera vez", async () => {
     const id = await findOrAddSourceText("Ch. 1", TEXT);
     expect(await db.sourceTexts.count()).toBe(1);
     expect((await db.sourceTexts.get(id))!.title).toBe("Ch. 1");
@@ -323,24 +323,24 @@ describe("findOrAddSourceText", () => {
     expect(await db.sourceTexts.count()).toBe(1);
   });
 
-  it("el t?tulo NO se sobrescribe: es un hecho sobre el texto", async () => {
-    // Si se actualizara, la columna "Origen" de Palabras cambiar?a bajo los pies
-    // entre sesiones y dejar?a de explicar por qu? hay dos mazos con la misma
-    // transcripci?n.
+  it("el título NO se sobrescribe: es un hecho sobre el texto", async () => {
+    // Si se actualizara, la columna "Origen" de Palabras cambiaría bajo los pies
+    // entre sesiones y dejaría de explicar por qué hay dos mazos con la misma
+    // transcripción.
     const id = await findOrAddSourceText("Ch. 1", TEXT);
     await findOrAddSourceText("Ch. 1 revisado", TEXT);
     expect((await db.sourceTexts.get(id))!.title).toBe("Ch. 1");
   });
 
-  it("un texto distinto s? crea su propia fila", async () => {
+  it("un texto distinto sí crea su propia fila", async () => {
     await findOrAddSourceText("Ch. 1", TEXT);
     await findOrAddSourceText("Ch. 2", "Un texto completamente distinto.");
     expect(await db.sourceTexts.count()).toBe(2);
   });
 
-  it("no normaliza: dos pegadas equivalentes pero no id?nticas no reutilizan", async () => {
-    // Fallo de rendimiento, no de correcci?n. Normalizar exigir?a decidir una
-    // canonicalizaci?n que adem?s cambiar?a lo que se guarda y lo que sale en el
+  it("no normaliza: dos pegadas equivalentes pero no idénticas no reutilizan", async () => {
+    // Fallo de rendimiento, no de corrección. Normalizar exigiría decidir una
+    // canonicalización que además cambiaría lo que se guarda y lo que sale en el
     // backup. Se documenta en vez de fingir que no pasa.
     await findOrAddSourceText("A", TEXT);
     await findOrAddSourceText("B", `${TEXT} `);
@@ -349,7 +349,7 @@ describe("findOrAddSourceText", () => {
 
   it("reutilizar no duplica nodos ni sources al reingerir", async () => {
     // `ingest()` es idempotente con el mismo `sourceTextId`: la identidad de la
-    // fila es `prior` y `contentHash` s?lo cubre el contenido del ?tem.
+    // fila es `prior` y `contentHash` sólo cubre el contenido del ítem.
     const id = await findOrAddSourceText("Ch. 1", TEXT);
     const src = { kind: "text" as const, priority: 20, sourceTextId: id };
     await ingest([item("run")], src);

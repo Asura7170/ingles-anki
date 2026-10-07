@@ -1,9 +1,14 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, type Deck } from "../db";
 import { allDeckStats, type DeckStats } from "../decks";
-import { deleteDeck } from "../purge";
+import { deleteDeck, runDelete } from "../purge";
 import { useApp } from "../store";
+
+// Identidad estable: un `?? []` en línea crea un array nuevo en cada render
+// mientras la consulta está pendiente, y ese array es la dependencia de la
+// consulta de estadísticas, así que la re-suscribe en cada uno.
+const NO_DECKS: Deck[] = [];
 
 export default function Decks() {
   // `createdAt` desc, no el orden de `++id`: los mazos se reimportan y el que
@@ -13,7 +18,7 @@ export default function Decks() {
     useLiveQuery(async () => {
       const rows = await db.decks.toArray();
       return rows.sort((a, b) => b.createdAt - a.createdAt);
-    }, []) ?? [];
+    }, []) ?? NO_DECKS;
   // Una consulta para todas las tarjetas. Antes cada `DeckCard` tenía la suya, y
   // `deckStats` terminaba en `db.sources.toArray()`: 20 mazos = 20 escaneos
   // completos y 20 suscripciones vivas que se relanzaban en cada cambio.
@@ -135,15 +140,23 @@ function DeckCard({
               Renombrar
             </button>
             {confirming ? (
-              <button
-                className="btn"
-                onClick={() => {
-                  setConfirming(false);
-                  void removeDeck(deck, notify);
-                }}
-              >
-                {confirmLabel}
-              </button>
+              // Cancelar como en Palabras: sin él, la única salida del confirm
+              // es confirmar o navegar away, en la única acción irreversible.
+              <>
+                <button
+                  className="btn"
+                  disabled={disabled}
+                  onClick={() => {
+                    setConfirming(false);
+                    void removeDeck(deck, notify);
+                  }}
+                >
+                  {confirmLabel}
+                </button>
+                <button className="btn" onClick={() => setConfirming(false)}>
+                  Cancelar
+                </button>
+              </>
             ) : (
               <button className="btn" onClick={() => setConfirming(true)} disabled={disabled}>
                 Borrar
@@ -168,7 +181,9 @@ function DeckCard({
  * también la pestaña Palabras, y en un componente no se puede probar sin DOM.
  */
 async function removeDeck(deck: Deck, notify: (msg: string) => void): Promise<void> {
-  const { words, kept, texts, shared } = await deleteDeck(deck);
+  const res = await runDelete(() => deleteDeck(deck), "No se pudo borrar el mazo", notify);
+  if (!res) return;
+  const { words, kept, texts, shared } = res;
   const parts = [`Mazo «${deck.name}» borrado.`];
   if (words || kept) {
     parts.push(
@@ -199,25 +214,36 @@ function RenameField({
   onNotify: (msg: string) => void;
 }) {
   const [name, setName] = useState(deck.name);
+  // `onBlur` y Enter disparan `save`, y el blur ocurre también al pulsar
+  // «Estudiar»: sin este cerrojo eran dos escrituras y dos avisos.
+  const busy = useRef(false);
 
   const save = async () => {
+    if (busy.current) return;
     const trimmed = name.trim();
     // Nombre vacío = no hacer nada. Borrar el nombre dejaría un mazo sin
     // identidad en la lista, y `db.decks` indexa `name`.
     if (!trimmed || trimmed === deck.name) return onDone();
-    // `decks.name` está indexado pero NO es único (`nodes.lemma` sí lo es, con
-    // `&`). Dos mazos con el mismo nombre son indistinguibles en la lista y en
-    // cualquier búsqueda por texto.
-    const clash = await db.decks
-      .filter((d) => d.id !== deck.id && d.name.trim().toLowerCase() === trimmed.toLowerCase())
-      .first();
-    if (clash) {
-      onNotify(`Ya existe un mazo llamado «${trimmed}».`);
-      return;
+    busy.current = true;
+    try {
+      // `decks.name` está indexado pero NO es único (`nodes.lemma` sí lo es, con
+      // `&`). Dos mazos con el mismo nombre son indistinguibles en la lista y en
+      // cualquier búsqueda por texto.
+      const clash = await db.decks
+        .filter((d) => d.id !== deck.id && d.name.trim().toLowerCase() === trimmed.toLowerCase())
+        .first();
+      if (clash) {
+        onNotify(`Ya existe un mazo llamado «${trimmed}».`);
+        return;
+      }
+      await db.decks.update(deck.id!, { name: trimmed });
+      onNotify(`Mazo renombrado a «${trimmed}».`);
+      onDone();
+    } catch (err) {
+      onNotify(`No se pudo renombrar el mazo: ${String(err)}`);
+    } finally {
+      busy.current = false;
     }
-    await db.decks.update(deck.id!, { name: trimmed });
-    onNotify(`Mazo renombrado a «${trimmed}».`);
-    onDone();
   };
 
   return (

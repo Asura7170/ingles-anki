@@ -49,6 +49,30 @@ export async function deleteWords(ids: number[]): Promise<number> {
 }
 
 /**
+ * Ejecuta un borrado destructivo y convierte el fallo en un aviso.
+ *
+ * IndexedDB es compartido por todas las pestañas del mismo origen y esta app no
+ * coordina entre ellas (ni `BroadcastChannel`, ni `navigator.locks`, ni
+ * `versionchange`), así que un aborto de transacción es reachable en uso normal:
+ * otra pestaña escribiendo, o el `scheduleAutoSave` de un borrado anterior
+ * peleándose con este. Sin esto, `await deleteWords(...)` sin capturar deja al
+ * usuario sin saber si se borró, y en dos sitios la interfaz ya había
+ * avanzado como si sí.
+ */
+export async function runDelete<T>(
+  op: () => Promise<T>,
+  failMsg: string,
+  notify: (msg: string) => void,
+): Promise<T | null> {
+  try {
+    return await op();
+  } catch (err) {
+    notify(`${failMsg}: ${String(err)}`);
+    return null;
+  }
+}
+
+/**
  * Borra un mazo y las palabras que le quedaban huérfanas.
  *
  * Sólo se borran las **no marcadas como conocidas**: la marca es un hecho sobre
@@ -68,8 +92,9 @@ export async function deleteWords(ids: number[]): Promise<number> {
  * ningún sitio.
  *
  * Devuelve el recuento real para que el aviso diga la verdad, incluido
- * `shared`: si una transcripción la comparten varios mazos, no se puede borrar
- * sin matar al otro (ver `ownsTexts`).
+ * `shared` — el número de **mazos** que comparten con este una transcripción,
+ * no el de transcripciones: si la comparten, no se puede borrar sin matar al
+ * otro. Un mazo importado no tiene transcripción, así que siempre da 0.
  */
 export async function deleteDeck(
   deck: Deck,
@@ -77,25 +102,35 @@ export async function deleteDeck(
   const ids = await deckNodeIds(deck);
   const sources = await db.sources.toArray();
 
-  // Transcripciones que otro mazo todavía reclama.
-  const shared = new Set<number>();
+  // Transcripciones que otro mazo todavía reclama — y cuántos mazos las
+  // reclaman. Hace falta la intersección: un mazo importado no tiene
+  // `sourceTextIds`, así que con la unión a secas cualquier mazo generado en la
+  // biblioteca lo hacía pasar por compartido, y el aviso nombraba una
+  // transcripción que no tenía. Y `holders` son mazos, no transcripciones: el
+  // aviso dice "la comparten N mazos".
+  const mineTexts = deck.sourceTextIds ?? [];
+  const holders = new Set<number>();
+  const sharedWithMe = new Set<number>();
   for (const d of await db.decks.toArray()) {
     if (d.id === deck.id) continue;
     // Sin filtrar por `kind`: `belongsToDeck` trata cualquier mazo no importado
     // por sus `sourceTextIds`, así que un `kind:"filter"` también contaría.
-    for (const t of d.sourceTextIds ?? []) shared.add(t);
+    const overlap = (d.sourceTextIds ?? []).filter((t) => mineTexts.includes(t));
+    if (!overlap.length) continue;
+    holders.add(d.id!);
+    for (const t of overlap) sharedWithMe.add(t);
   }
-  const ownTexts = new Set((deck.sourceTextIds ?? []).filter((t) => !shared.has(t)));
+  const ownTexts = new Set(mineTexts.filter((t) => !sharedWithMe.has(t)));
 
   const mine = new Set(
     sources
       .filter((s) => {
         if (!belongsToDeck(s, deck)) return false;
-        // Una fila con `deckId` pertenece a un mazo importado por definición. Un
-        // mazo no importado no puede reclamarla: si lo hiciera, borrar este
-        // borraría las palabras de aquel. Sólo un backup restaurado a mano puede
-        // producir una fila así — `importFromFile` no valida nada.
-        if (s.deckId !== undefined) return deck.kind === "import";
+        // Fila de un mazo importado: nuestra sin más, ya que `belongsToDeck`
+        // comparó `deckId`. El guard de `deckId` que hace `belongsToDeck`
+        // (un mazo no importado no la reclama) es lo que impide que un mazo
+        // generado se lleve las palabras de un importado.
+        if (s.deckId !== undefined) return true;
         // Fila de transcripción: sólo si es nuestra en exclusiva.
         //
         // Y aquí está la costura crítica: si la transcripción se comparte,
@@ -129,11 +164,11 @@ export async function deleteDeck(
       .delete();
     await db.decks.delete(deck.id!);
     await cascade(doomed);
-    for (const t of ownTexts) await db.sourceTexts.delete(t);
+    await db.sourceTexts.bulkDelete([...ownTexts]);
   });
   scheduleAutoSave();
 
-  return { words: doomed.length, kept, texts: ownTexts.size, shared: shared.size };
+  return { words: doomed.length, kept, texts: ownTexts.size, shared: holders.size };
 }
 
 /**
@@ -153,9 +188,9 @@ export async function purgeOrphanTexts(): Promise<number> {
   const orphans = (await db.sourceTexts.toArray()).filter((t) => !referenced.has(t.id!));
   if (!orphans.length) return 0;
 
-  await db.transaction("rw", db.sourceTexts, async () => {
-    for (const t of orphans) await db.sourceTexts.delete(t.id!);
-  });
+  await db.transaction("rw", db.sourceTexts, () =>
+    db.sourceTexts.bulkDelete(orphans.map((t) => t.id!)),
+  );
   scheduleAutoSave();
   return orphans.length;
 }

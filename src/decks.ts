@@ -17,6 +17,12 @@ export interface StudyItem {
  */
 export function belongsToDeck(source: Source, deck: Deck): boolean {
   if (deck.kind === "import") return source.deckId === deck.id;
+  // Una fila con `deckId` pertenece a un mazo importado por definición: un mazo
+  // no importado no puede reclamarla, o borrarlo borraría las palabras de
+  // aquel. Sólo un backup restaurado a mano produce una fila así —`importFromFile`
+  // no valida nada— y sin este guard leer y borrar discrepaban: el recuento la
+  // contaba para el generado y la cascada la destruía al borrar el importado.
+  if (source.deckId !== undefined) return false;
   if (deck.sourceTextIds?.length) {
     return source.sourceTextId != null && deck.sourceTextIds.includes(source.sourceTextId);
   }
@@ -67,7 +73,10 @@ export async function allDeckStats(
   now = Date.now(),
 ): Promise<Map<number, DeckStats>> {
   const out = new Map<number, DeckStats>();
-  for (const d of decks) if (d.id !== undefined) out.set(d.id, EMPTY_STATS);
+  // Copia, no el singleton: `EMPTY_STATS` es un objeto de módulo y sale por un
+  // retorno público; una futura `stats.total = x` lo corrompería para todos los
+  // mazos vacíos a la vez.
+  for (const d of decks) if (d.id !== undefined) out.set(d.id, { ...EMPTY_STATS });
   if (!decks.length) return out;
 
   const idsByDeck = new Map<number, Set<number>>();
@@ -97,8 +106,8 @@ export async function allDeckStats(
 
 /** Azúcar sobre `allDeckStats` para cuando sólo interesa un mazo (tests, CLI). */
 export async function deckStats(deck: Deck, now = Date.now()): Promise<DeckStats> {
-  if (deck.id === undefined) return EMPTY_STATS;
-  return (await allDeckStats([deck], now)).get(deck.id) ?? EMPTY_STATS;
+  if (deck.id === undefined) return { ...EMPTY_STATS };
+  return (await allDeckStats([deck], now)).get(deck.id) ?? { ...EMPTY_STATS };
 }
 
 /**
@@ -128,7 +137,12 @@ export async function buildQueue(
     .filter((n) => !isNew(n) && n.due <= now)
     .sort((a, b) => retrievability(a.card, now) - retrievability(b.card, now));
 
-  const fresh = eligible.filter(isNew).slice(0, newLimit);
+  // El límite viene de IndexedDB con un cast sin comprobar (`getSetting`), así
+  // que un backup editado a mano puede traer `NaN` o un negativo: `slice(0, NaN)`
+  // no da nada y `slice(0, -1)` quita la última. El slider de Ajustes ya lo
+  // acota; esto es el límite de confianza.
+  const limit = Number.isFinite(newLimit) ? Math.max(0, Math.floor(newLimit)) : 0;
+  const fresh = eligible.filter(isNew).slice(0, limit);
   const queue = [...reviews, ...fresh];
 
   const rows = queue.length

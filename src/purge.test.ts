@@ -2,13 +2,13 @@ import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { IDBFactory } from "fake-indexeddb";
 import { db, type Deck } from "./db";
-import { buildQueue } from "./decks";
-import { deleteDeck, deleteWords, purgeOrphanTexts } from "./purge";
+import { allDeckStats, buildQueue } from "./decks";
+import { deleteDeck, deleteWords, purgeOrphanTexts, runDelete } from "./purge";
 import { ingest, type IngestItem } from "./ingest";
 import { newCard, review } from "./srs";
 
 /**
- * El bug que motivationsó este módulo: al borrar un mazo creado desde «Pegar
+ * El bug que motivó este módulo: al borrar un mazo creado desde «Pegar
  * transcripción», sus palabras seguían en la pestaña Palabras. Un mazo generado
  * se localiza por `sourceTextIds`, no por `deckId`, así que la regla anterior
  * (`sources.deckId === X`) no encontraba ninguna de sus palabras.
@@ -445,10 +445,188 @@ describe("deleteDeck — casos sin palabras", () => {
   });
 });
 
+/**
+ * `shared` cuenta MAZOS, no transcripciones, y sólo los que comparten una
+ * transcripción con ÉSTE. Con la unión a secas de los `sourceTextIds` de todos
+ * los demás, cualquier mazo generado en la biblioteca hacía pasar por
+ * compartido a un mazo importado — que no tiene transcripción — y el aviso
+ * nombraba texto y palabras que no existían, en el borrado más común del app.
+ */
+describe("deleteDeck — `shared` cuenta mazos, no transcripciones", () => {
+  it("un mazo importado da 0 aunque haya mazos generados: no comparte nada", async () => {
+    await seedGenerated("T", ["run"]);
+    const imported = await seedDeck("A", ["study"]);
+
+    const r = await deleteDeck(imported);
+
+    expect(r.shared).toBe(0);
+    expect(r.texts).toBe(0);
+  });
+
+  it("tres mazos sobre la misma transcripción dan 3, no 1", async () => {
+    const sourceTextId = (await db.sourceTexts.add({
+      kind: "text",
+      title: "Ch. 1",
+      body: "run",
+      importedAt: NOW,
+    }))!;
+    await ingest([item("run")], { kind: "text", priority: 20, sourceTextId });
+    const mk = (name: string, t: number) =>
+      db.decks.add({ name, kind: "generated", sourceTextIds: [t], createdAt: t });
+    await mk("A", sourceTextId);
+    await mk("B", sourceTextId);
+    await mk("C", sourceTextId);
+    const a = await deckOf("A");
+
+    expect((await deleteDeck(a)).shared).toBe(2);
+  });
+
+  it("un mazo con dos transcripciones cuenta una vez por mazo, no dos", async () => {
+    const t1 = (await db.sourceTexts.add({
+      kind: "text",
+      title: "T1",
+      body: "run",
+      importedAt: NOW,
+    }))!;
+    const t2 = (await db.sourceTexts.add({
+      kind: "text",
+      title: "T2",
+      body: "study",
+      importedAt: NOW,
+    }))!;
+    await ingest([item("run"), item("study")], { kind: "text", priority: 20, sourceTextId: t1 });
+    await ingest([item("study")], { kind: "text", priority: 20, sourceTextId: t2 });
+    await db.decks.add({ name: "B", kind: "generated", sourceTextIds: [t1, t2], createdAt: NOW });
+    await db.decks.add({
+      name: "A",
+      kind: "generated",
+      sourceTextIds: [t1, t2],
+      createdAt: NOW + 1,
+    });
+
+    // B comparte las dos transcripciones con A: es un mazo, no dos.
+    expect((await deleteDeck(await deckOf("A"))).shared).toBe(1);
+  });
+
+  it("una transcripción que otro mazo tiene en exclusiva ajena no cuenta", async () => {
+    await seedGenerated("Otro", ["child"]);
+    const mine = await seedGenerated("Mío", ["run"]);
+
+    expect((await deleteDeck(mine)).shared).toBe(0);
+  });
+});
+
+/**
+ * Una fila de `sources` puede llevar `deckId` Y `sourceTextId`: sólo un backup
+ * restaurado a mano lo produce, porque `importFromFile` no valida nada. La regla
+ * vive en `belongsToDeck` para que lectura y borrado no discrepen — antes la
+ * lectura la contaba para el mazo generado y el borrado la destruía al borrar el
+ * importado, así que tocar un mazo cambiaba la tarjeta de otro.
+ */
+describe("una fila con deckId y sourceTextId a la vez", () => {
+  it("el mazo generado no la cuenta como suya al LEER", async () => {
+    const generated = await seedGenerated("G", ["run"]);
+    await seedDeck("I", ["study"]);
+    const study = (await db.nodes.where("lemma").equals("study").first())!;
+    await db.sources.add({
+      nodeId: study.id!,
+      kind: "text",
+      deckId: (await deckOf("I")).id!,
+      sourceTextId: generated.sourceTextIds![0]!,
+      priority: 20,
+      contentVersion: "x",
+      addedAt: NOW,
+    });
+
+    // "run" es de G; "study" sólo tiene la fila dual, que es del importado.
+    const stats = (await allDeckStats([generated])).get(generated.id!)!;
+    expect(stats.total).toBe(1);
+    // Y la cola de G tampoco la ofrece.
+    expect((await buildQueue(generated, 20, NOW)).map((i) => i.node.lemma)).toEqual(["run"]);
+  });
+
+  it("borrar el importado deja la tarjeta y la cola del generado intactas", async () => {
+    const generated = await seedGenerated("G", ["run"]);
+    const imported = await seedDeck("I", ["study"]);
+    const study = (await db.nodes.where("lemma").equals("study").first())!;
+    await db.sources.add({
+      nodeId: study.id!,
+      kind: "text",
+      deckId: imported.id!,
+      sourceTextId: generated.sourceTextIds![0]!,
+      priority: 20,
+      contentVersion: "x",
+      addedAt: NOW,
+    });
+
+    const antes = (await allDeckStats([generated])).get(generated.id!)!.total;
+    await deleteDeck(imported);
+    const despues = (await allDeckStats([generated])).get(generated.id!)!.total;
+
+    // La fila dual es del importado (`deckId`), así que al borrarlo se va con él
+    // y "study" queda huérfana y se borra: correcto, la tenía I. Lo que no puede
+    // pasar es que la tarjeta de G cambie, y antes lo hacía porque la LEÍA como
+    // propia: el usuario tocaba I y veía a G perder una palabra sin haber tocado
+    // G. Con el guard de `deckId` en `belongsToDeck`, ni la cuenta antes ni
+    // después.
+    expect(antes).toBe(1);
+    expect(despues).toBe(1);
+    expect(await db.nodes.where("lemma").equals("study").first()).toBeUndefined();
+    expect((await buildQueue(generated, 20, NOW)).map((i) => i.node.lemma)).toEqual(["run"]);
+  });
+});
+
+describe("runDelete", () => {
+  it("devuelve el valor si la operación va bien", async () => {
+    expect(
+      await runDelete(
+        async () => 42,
+        "fallo",
+        () => {},
+      ),
+    ).toBe(42);
+  });
+
+  it("avisa y devuelve null si la operación lanza", async () => {
+    const msgs: string[] = [];
+    const r = await runDelete(
+      async () => {
+        throw new Error("boom");
+      },
+      "No se pudo borrar el mazo",
+      (m) => msgs.push(m),
+    );
+    expect(r).toBeNull();
+    expect(msgs).toEqual(["No se pudo borrar el mazo: Error: boom"]);
+  });
+
+  it("un null legítimo no se confunde con un fallo", async () => {
+    expect(
+      await runDelete(
+        async () => null,
+        "fallo",
+        () => {},
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("buildQueue acota el límite de nuevas", () => {
+  it("NaN o negativo no rompen la cola", async () => {
+    const deck = await seedGenerated("T", ["a1", "a2", "a3"]);
+
+    // `slice(0, NaN)` no daba nada y `slice(0, -1)` quitaba la última: un
+    // backup editado a mano pasaba el límite sin comprobar por `getSetting`.
+    expect((await buildQueue(deck, Number.NaN, NOW)).length).toBe(0);
+    expect((await buildQueue(deck, -1, NOW)).length).toBe(0);
+    expect((await buildQueue(deck, 2, NOW)).length).toBe(2);
+  });
+});
+
 describe("deleteDeck es atómico", () => {
   it("si la cascada falla, no se borra el mazo", async () => {
     // Con dos transacciones, un fallo entre medias dejaba el mazo borrado y las
-    // palabras huérfanas para siempre: el mismo bug que motivationsó el módulo,
+    // palabras huérfanas para siempre: el mismo bug que motivó el módulo,
     // pero sólo bajo fallo — que es la forma que no se reproduce a mano.
     const deck = await seedDeck("A", ["run", "study"]);
     expect(await db.nodes.count()).toBe(2);

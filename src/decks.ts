@@ -29,6 +29,12 @@ export interface DeckStats {
   fresh: number;
 }
 
+/** Una palabra es "nueva" si FSRS nunca la ha visto: sin card o en estado New. */
+const isNew = (n: Node) => !n.card || n.card.state === 0;
+
+/** Sin `dailyNewLimit` explícito, 20 nuevas por sesión. Lo ve también la UI. */
+export const DEFAULT_DAILY_NEW_LIMIT = 20;
+
 export async function deckStats(deck: Deck, now = Date.now()): Promise<DeckStats> {
   const ids = await deckNodeIds(deck);
   if (!ids.length) return { total: 0, known: 0, learning: 0, due: 0, fresh: 0 };
@@ -36,7 +42,6 @@ export async function deckStats(deck: Deck, now = Date.now()): Promise<DeckStats
   const nodes = await db.nodes.where("id").anyOf(ids).toArray();
   const scoped = nodes.filter((n) => !deck.wordKinds || deck.wordKinds.includes(n.kind));
   const unseen = scoped.filter((n) => !n.known);
-  const isNew = (n: Node) => !n.card || n.card.state === 0;
 
   return {
     total: scoped.length,
@@ -61,13 +66,12 @@ export async function buildQueue(deck: Deck, now = Date.now()): Promise<StudyIte
     (n) => !n.known && (!deck.wordKinds || deck.wordKinds.includes(n.kind)),
   );
 
-  const isNew = (n: Node) => !n.card || n.card.state === 0;
-
   const reviews = eligible
     .filter((n) => !isNew(n) && n.due <= now)
     .sort((a, b) => retrievability(a.card, now) - retrievability(b.card, now));
 
-  const fresh = eligible.filter(isNew).slice(0, deck.dailyNewLimit ?? 20);
+  const limit = deck.dailyNewLimit ?? DEFAULT_DAILY_NEW_LIMIT;
+  const fresh = eligible.filter(isNew).slice(0, limit);
   const queue = [...reviews, ...fresh];
 
   const rows = queue.length

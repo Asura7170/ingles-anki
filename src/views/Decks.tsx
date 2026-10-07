@@ -1,6 +1,6 @@
 import { useLiveQuery } from "dexie-react-hooks";
 import { db } from "../db";
-import { deckStats, type DeckStats } from "../decks";
+import { deckStats, DEFAULT_DAILY_NEW_LIMIT, type DeckStats } from "../decks";
 import { useApp } from "../store";
 
 export default function Decks() {
@@ -47,7 +47,8 @@ function DeckCard({
   disabled: boolean;
 }) {
   const stats = useLiveQuery<DeckStats>(() => deckStats(deck), [deck.id, deck.name, deck.kind]);
-  const pending = (stats?.due ?? 0) + Math.min(stats?.fresh ?? 0, 20);
+  const pending =
+    (stats?.due ?? 0) + Math.min(stats?.fresh ?? 0, deck.dailyNewLimit ?? DEFAULT_DAILY_NEW_LIMIT);
 
   return (
     <div className="panel">

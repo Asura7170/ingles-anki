@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import { IDBFactory } from "fake-indexeddb";
 import { db, type Node } from "./db";
 import { ingest, markSourceKnown, hash, type IngestItem } from "./ingest";
-import { newCard } from "./srs";
 
 /**
  * EL INVARIANTE CENTRAL DEL SISTEMA.
@@ -284,7 +283,14 @@ describe("la marca known no la toca el SRS", () => {
   it("una palabra recién creada nace con card nueva, no vencida", async () => {
     await ingest([item("run")], { kind: "apkg", priority: 30 });
     const n = await db.nodes.where("lemma").equals("run").first();
-    expect(n!.card).toEqual(newCard(n!.createdAt));
+    // Se compara el estado y el `due` con tolerancia de 2 ms en lugar de
+    // `toEqual`: `createdAt` viene de un `Date.now()` y `newCard` lo vuelve a
+    // leer, así que un clock tick entre ambas llamadas daba diferencias de 1 ms.
+    // Un fallo ése no dice nada del comportamiento que se quiere fijar.
+    expect(n!.card!.state).toBe(0);
+    expect(n!.card!.reps).toBe(0);
+    expect(n!.card!.stability).toBe(0);
+    expect(Math.abs(+n!.card!.due - +n!.createdAt)).toBeLessThanOrEqual(2);
   });
 });
 

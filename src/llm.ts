@@ -148,6 +148,79 @@ export interface StreamResult {
   toolCalls: ToolCall[];
 }
 
+/** Trozo de tool call tal como llega en un delta del stream. */
+interface ToolCallDelta {
+  index?: number;
+  id?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+interface Chunk {
+  choices?: {
+    delta?: { content?: string | null; tool_calls?: ToolCallDelta[] };
+    finish_reason?: string | null;
+  }[];
+}
+
+type PartialToolCall = { id: string; name: string; args: string };
+
+/**
+ * El sobre de un delta trae seis niveles de optional chaining. Normalizarlo una
+ * sola vez aquí deja el bucle del stream sin una cadena de `?.` por línea, que
+ * además cada `?.` cuenta como decisión de complejidad.
+ */
+function firstDelta(chunk: Chunk): { content: string; tools: ToolCallDelta[] } {
+  const delta = chunk.choices?.[0]?.delta;
+  return { content: delta?.content ?? "", tools: delta?.tool_calls ?? [] };
+}
+
+/**
+ * El stream trocea cada tool call: un delta trae el id, otro el nombre, otro un
+ * fragmento de argumentos. Se concatenan por índice. El `name` se acumula y no
+ * se sobrescribe porque hay proveedores que lo repiten en cada delta.
+ */
+function accumulateToolCall(partial: Map<number, PartialToolCall>, tc: ToolCallDelta): void {
+  const idx = tc.index ?? 0;
+  const entry = partial.get(idx) ?? { id: "", name: "", args: "" };
+  if (tc.id) entry.id = tc.id;
+  if (tc.function?.name) entry.name += tc.function.name;
+  if (tc.function?.arguments) entry.args += tc.function.arguments;
+  partial.set(idx, entry);
+}
+
+/**
+ * Los argumentos llegan como texto JSON concatenado y pueden venir truncados si
+ * el stream se corta. Degradar a `{}` es correcto: el validador de tool calls
+ * rechaza la llamada, mientras que lanzar aquí tiraría la respuesta completa.
+ */
+function parseArgs(raw: string): Record<string, unknown> {
+  try {
+    return JSON.parse(raw || "{}") as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function buildPayload(
+  cfg: LlmConfig,
+  opts: { messages: ChatMessage[]; tools?: ToolDef[] },
+  stream: boolean,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    model: cfg.model,
+    messages: opts.messages,
+    temperature: 0,
+    stream,
+  };
+  // `tool_choice` solo tiene sentido junto a `tools`: enviarlo sin lista hace
+  // fallar el 400 en varios proveedores.
+  if (opts.tools?.length) {
+    payload.tools = opts.tools;
+    payload.tool_choice = "auto";
+  }
+  return payload;
+}
+
 export async function streamChat(
   cfg: LlmConfig,
   opts: {
@@ -157,75 +230,36 @@ export async function streamChat(
     onText?: (t: string) => void;
   },
 ): Promise<StreamResult> {
-  const payload: Record<string, unknown> = {
-    model: cfg.model,
-    messages: opts.messages,
-    temperature: 0,
-    stream: true,
-  };
-  if (opts.tools?.length) {
-    payload.tools = opts.tools;
-    payload.tool_choice = "auto";
-  }
-
   const res = await fetch(url(cfg.baseUrl), {
     method: "POST",
     headers: headers(cfg),
-    body: JSON.stringify(payload),
+    body: JSON.stringify(buildPayload(cfg, opts, true)),
     signal: opts.signal,
   });
   if (!res.ok) await fail(res);
 
   let text = "";
-  const partial = new Map<number, { id: string; name: string; args: string }>();
+  const partial = new Map<number, PartialToolCall>();
 
   for await (const data of sse(res)) {
-    let chunk: {
-      choices?: {
-        delta?: {
-          content?: string | null;
-          tool_calls?: {
-            index?: number;
-            id?: string;
-            function?: { name?: string; arguments?: string };
-          }[];
-        };
-        finish_reason?: string | null;
-      }[];
-    };
+    let chunk: Chunk;
     try {
-      chunk = JSON.parse(data);
+      chunk = JSON.parse(data) as Chunk;
     } catch {
+      // Un SSE mal formado no debe tumbar el resto del stream.
       continue;
     }
-    const delta = chunk.choices?.[0]?.delta;
-    if (delta?.content) {
-      text += delta.content;
-      opts.onText?.(delta.content);
+    const { content, tools } = firstDelta(chunk);
+    if (content) {
+      text += content;
+      opts.onText?.(content);
     }
-    for (const tc of delta?.tool_calls ?? []) {
-      const idx = tc.index ?? 0;
-      const entry = partial.get(idx) ?? { id: "", name: "", args: "" };
-      if (tc.id) entry.id = tc.id;
-      if (tc.function?.name) entry.name += tc.function.name;
-      if (tc.function?.arguments) entry.args += tc.function.arguments;
-      partial.set(idx, entry);
-    }
+    for (const tc of tools) accumulateToolCall(partial, tc);
   }
 
   const toolCalls: ToolCall[] = [...partial.values()]
     .filter((p) => p.name)
-    .map((p) => ({
-      id: p.id || `call_${p.name}`,
-      name: p.name,
-      args: (() => {
-        try {
-          return JSON.parse(p.args || "{}") as Record<string, unknown>;
-        } catch {
-          return {};
-        }
-      })(),
-    }));
+    .map((p) => ({ id: p.id || `call_${p.name}`, name: p.name, args: parseArgs(p.args) }));
 
   return { text, toolCalls };
 }

@@ -6,6 +6,11 @@ catalog:
   vitest: 5.0.1
   vite-plus: 1.0.0
   "@vitest/coverage-v8": 5.0.1
+  # >= v20 obligatorio: la v19 y anteriores tienen CVE-2025-61927, un escape
+  # del contexto VM a Node.
+  happy-dom: 20.14.5
+  "@testing-library/react": 16.3.3
+  "@testing-library/jest-dom": 7.0.1
 overrides:
   vite@*: "catalog:"
   vitest@*: "catalog:"

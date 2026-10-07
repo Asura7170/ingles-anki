@@ -36,6 +36,42 @@ Responde EXCLUSIVAMENTE con JSON válido:
 Incluye exactamente un item por id recibido, sin omitir, sin añadir y sin repetir. "total" es el
 número de items del array.`;
 
+/**
+ * Valida lo que devolvió el modelo. El prompt exige ids `[L001]` y un `total`
+ * posterior, pero un modelo puede ignorar cualquiera de los dos, así que la
+ * confianza no está en el prompt sino en esta reconciliación.
+ */
+function parseItems(
+  items: { id: string; translations?: unknown }[],
+  units: TranslationUnit[],
+  declaredTotal: unknown,
+): { got: Map<string, string[]>; invalid: number } {
+  const byId = new Map(units.map((u) => [u.id, u]));
+  const got = new Map<string, string[]>();
+  let invalid = 0;
+
+  for (const it of items) {
+    if (!byId.has(it.id)) continue; // palabra inventada: descartar
+    if (!Array.isArray(it.translations)) {
+      invalid++;
+      continue;
+    }
+    // Sólo strings. Un modelo puede devolver null o un número dentro del array
+    // y `String(t)` los convertiría en las cadenas "null" y "42", que se
+    // mostrarían como traducciones legítimas en la card.
+    const translations = it.translations
+      .filter((t): t is string => typeof t === "string")
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    if (translations.length) got.set(it.id, translations);
+  }
+
+  // declared != real: el modelo se perdió la cuenta o truncó.
+  if (typeof declaredTotal === "number" && declaredTotal !== items.length) invalid++;
+  return { got, invalid };
+}
+
 async function translateChunk(
   cfg: LlmConfig,
   units: TranslationUnit[],
@@ -58,31 +94,7 @@ async function translateChunk(
   const items = json.items;
   if (!Array.isArray(items)) throw new Error("La respuesta no trae un array `items`");
 
-  const byId = new Map(units.map((u) => [u.id, u]));
-  const got = new Map<string, string[]>();
-  let invalid = 0;
-
-  for (const it of items) {
-    const unit = byId.get(it.id);
-    if (!unit) continue; // palabra inventada: descartar
-    if (!Array.isArray(it.translations)) {
-      invalid++;
-      continue;
-    }
-    // Sólo strings. Un modelo puede devolver null o un número dentro del array
-    // y `String(t)` los convertiría en las cadenas "null" y "42", que se
-    // mostrarían como traducciones legítimas en la card.
-    const translations = it.translations
-      .filter((t): t is string => typeof t === "string")
-      .map((t) => t.trim())
-      .filter(Boolean)
-      .slice(0, 3);
-    if (translations.length) got.set(it.id, translations);
-  }
-
-  // declared != real: el modelo se perdió la cuenta o truncó.
-  if (typeof json.total === "number" && json.total !== items.length) invalid++;
-
+  const { got, invalid } = parseItems(items, units, json.total);
   const missing = units.filter((u) => !got.has(u.id));
   // Los que faltaron se reintentan solos; si no hay nada que reintentar, falla
   // para que el llamador aplique halving sobre el lote entero.

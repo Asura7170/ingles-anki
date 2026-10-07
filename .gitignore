@@ -3,6 +3,9 @@ dist
 coverage
 .playwright-cli
 
+# Snapshot que escribe crapper (CRAP por funcion).
+.metrics
+
 # Material de referencia personal, ajeno al proyecto.
 docs/
 

@@ -5,6 +5,7 @@ import { loadFrequency } from "./identity";
 import { newCard, review as srsReview } from "./srs";
 import { gradeTyping, hasTypingContext } from "./grade";
 import { buildQueue, type StudyItem } from "./decks";
+import { fillMissingTranslations } from "./fill-senses";
 import type { Comparison } from "./diff";
 
 export type View = "decks" | "ingest" | "words" | "settings";
@@ -214,40 +215,27 @@ export const useApp = create<AppState>((set, get) => ({
 /**
  * Prefetch: al abrir sesión y en cada avance se traducen la palabra visible +
  * las 4 siguientes. Nunca se traduce "la que tienes delante" — eso genera lag.
+ *
+ * `inFlight` evita lotes duplicados: `startSession` y `advance` llaman sin
+ * `await` a propósito, así que dos prefectos pueden solaparse.
  */
 export async function prefetchTranslations(prefs: Prefs, nodes: StudyItem[]): Promise<void> {
-  const { llm, targetLang } = prefs;
-  if (!llm.model || nodes.length === 0) return;
-
-  const units: { id: string; word: string; kind: "word" | "phrase" }[] = [];
-  for (const { node } of nodes) {
-    if (inFlight.has(node.lemma)) continue;
-    const sense = await db.senses.where("nodeId").equals(node.id!).first();
-    if (sense && sense.translations.length > 0) continue;
-    inFlight.add(node.lemma);
-    units.push({ id: `L${String(node.id).padStart(4, "0")}`, word: node.lemma, kind: node.kind });
-  }
-  if (!units.length) return;
-
+  if (!prefs.llm.model || nodes.length === 0) return;
   try {
-    const { translateBatch } = await import("./translate");
-    const got = await translateBatch(llm, units, targetLang);
-    await db.transaction("rw", db.senses, async () => {
-      for (const [id, translations] of got) {
-        const nodeId = Number(id.slice(1));
-        const sense = await db.senses.where("nodeId").equals(nodeId).first();
-        if (!sense) continue;
-        const set = new Set(sense.translations);
-        const before = set.size;
-        for (const t of translations) set.add(t);
-        if (set.size !== before) {
-          await db.senses.update(sense.id!, { translations: [...set], translationSource: "ai" });
-        }
-      }
-    });
+    await fillMissingTranslations(
+      prefs.llm,
+      prefs.targetLang,
+      nodes.map(({ node }) => node),
+      {
+        claim: (lemma) => {
+          if (inFlight.has(lemma)) return false;
+          inFlight.add(lemma);
+          return true;
+        },
+        release: (lemma) => inFlight.delete(lemma),
+      },
+    );
   } catch {
     // Un fallo de prefetch no interrumpe la sesión: la card cae a solo-palabra.
-  } finally {
-    for (const u of units) inFlight.delete(u.word);
   }
 }

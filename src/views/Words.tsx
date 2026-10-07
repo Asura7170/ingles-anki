@@ -163,7 +163,12 @@ function rLabel(node: Node): string {
   return node.due <= Date.now() ? "vencida" : "en curso";
 }
 
-function NodeDialog({ node, onClose }: { node: Node; onClose: () => void }) {
+/**
+ * Exportada para testearla: la lógica de las dos ramas ("reiniciar historial" vs
+ * "sólo que aparezca") sólo se puede comprobar pulsando los botones de verdad, y
+ * también necesita `dialog.showModal()`, que jsdom no implementa.
+ */
+export function NodeDialog({ node, onClose }: { node: Node; onClose: () => void }) {
   const unmark = useApp((s) => s.unmark);
   const ref = useRef<HTMLDialogElement>(null);
 

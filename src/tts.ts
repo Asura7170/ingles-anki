@@ -69,6 +69,30 @@ export function pickVoice(lang: string): SpeechSynthesisVoice | undefined {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Trocea por palabras respetando `max`. Devuelve trozos cerrados más un último
+ * resto: quien llama lo reutiliza como buffer para pegarle el segmento
+ * siguiente, así que no se pierde texto al final.
+ *
+ * Si una palabra sola supera `max` se emite entera. Cortarla por caracteres
+ * produciría fragmentos que el TTS lee como palabras distintas.
+ */
+function splitByWord(text: string, max: number): string[] {
+  const out: string[] = [];
+  let buf = "";
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const next = buf ? `${buf} ${word}` : word;
+    if (buf && next.length > max) {
+      out.push(buf);
+      buf = word;
+    } else {
+      buf = next;
+    }
+  }
+  if (buf) out.push(buf);
+  return out;
+}
+
 /** Trocear para no pasar de ~180 caracteres: ~8 s, muy por debajo del corte. */
 function chunkSentences(text: string, max = 180): string[] {
   const parts = text.split(/(?<=[.!?…])\s+/);
@@ -86,17 +110,9 @@ function chunkSentences(text: string, max = 180): string[] {
     // es enorme, se acepta el corte antes que locutar 20 s de golpe.
     if (part.length > max) {
       flush();
-      let wordBuf = "";
-      for (const word of part.split(/\s+/).filter(Boolean)) {
-        const next = wordBuf ? `${wordBuf} ${word}` : word;
-        if (wordBuf && next.length > max) {
-          out.push(wordBuf);
-          wordBuf = word;
-        } else {
-          wordBuf = next;
-        }
-      }
-      buf = wordBuf;
+      const words = splitByWord(part, max);
+      out.push(...words.slice(0, -1));
+      buf = words.at(-1) ?? "";
       continue;
     }
 

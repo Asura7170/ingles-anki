@@ -5,6 +5,7 @@ import { extractCandidates, loadFrequency, freqRank, type Candidate } from "../i
 import { importApkg } from "../apkg";
 import { useApp } from "../store";
 import { scheduleAutoSave } from "../backup";
+import { fillMissingTranslations } from "../fill-senses";
 
 export default function Ingest() {
   const notify = useApp((s) => s.notify);
@@ -46,39 +47,7 @@ export default function Ingest() {
     setWorking("Creando mazo…");
     try {
       const name = title.trim() || `Texto ${new Date().toLocaleDateString("es")}`;
-      const sourceTextId = (await db.sourceTexts.add({
-        kind: "text",
-        title: name,
-        body: text,
-        importedAt: Date.now(),
-      }))!;
-
-      const result = await ingest(
-        preview.map((c) => ({
-          headword: c.headword,
-          lemma: c.lemma,
-          kind: c.kind,
-          occurrences: c.occurrences,
-          examples: c.bestSentence ? [{ text: c.bestSentence }] : undefined,
-        })),
-        { kind: "text", priority: 20, sourceTextId },
-      );
-
-      // Exposición pasiva: registro aparte. NUNCA se inyecta al scheduler.
-      const nodes = await db.nodes.toArray();
-      const byLemma = new Map(nodes.map((n) => [n.lemma, n.id!]));
-      const rows = preview
-        .map((c) => ({ nodeId: byLemma.get(c.lemma), occurrences: c.occurrences }))
-        .filter((r): r is { nodeId: number; occurrences: number } => r.nodeId !== undefined)
-        .map((r) => ({ ...r, sourceTextId, ts: Date.now() }));
-      if (rows.length) await db.exposure.bulkAdd(rows);
-
-      await db.decks.add({
-        name,
-        kind: "generated",
-        sourceTextIds: [sourceTextId],
-        createdAt: Date.now(),
-      });
+      const result = await createDeckFromText({ name, text, preview });
 
       notify(`Mazo «${name}»: ${result.created} nuevas, ${result.merged} ya existían.`);
 
@@ -234,43 +203,82 @@ export default function Ingest() {
   );
 }
 
+/**
+ * Persiste el texto como origen, fusiona sus palabras y cierra un mazo.
+ *
+ * El orden importa y no es intercambiable: `ingest()` debe correr antes de leer
+ * `db.nodes`, porque el `byLemma` que resuelve los ids para la exposición sólo
+ * existe después de la fusión. Escribir el mazo antes de la exposición dejaría
+ * un mazo vacío si `bulkAdd` fallara.
+ */
+async function createDeckFromText({
+  name,
+  text,
+  preview,
+}: {
+  name: string;
+  text: string;
+  preview: Candidate[];
+}): Promise<{ created: number; merged: number }> {
+  const sourceTextId = (await db.sourceTexts.add({
+    kind: "text",
+    title: name,
+    body: text,
+    importedAt: Date.now(),
+  }))!;
+
+  const result = await ingest(
+    preview.map((c) => ({
+      headword: c.headword,
+      lemma: c.lemma,
+      kind: c.kind,
+      occurrences: c.occurrences,
+      examples: c.bestSentence ? [{ text: c.bestSentence }] : undefined,
+    })),
+    { kind: "text", priority: 20, sourceTextId },
+  );
+
+  // Exposición pasiva: registro aparte. NUNCA se inyecta al scheduler.
+  const nodes = await db.nodes.toArray();
+  const byLemma = new Map(nodes.map((n) => [n.lemma, n.id!]));
+  const rows = preview
+    .map((c) => ({ nodeId: byLemma.get(c.lemma), occurrences: c.occurrences }))
+    .filter((r): r is { nodeId: number; occurrences: number } => r.nodeId !== undefined)
+    .map((r) => ({ ...r, sourceTextId, ts: Date.now() }));
+  if (rows.length) await db.exposure.bulkAdd(rows);
+
+  await db.decks.add({
+    name,
+    kind: "generated",
+    sourceTextIds: [sourceTextId],
+    createdAt: Date.now(),
+  });
+
+  return result;
+}
+
 async function translateMissing(
   prefs: import("../store").Prefs,
   candidates: Candidate[],
   notify: (m: string) => void,
 ): Promise<void> {
+  // `createDeck` acaba de fusionar los candidatos, así que se resuelve por
+  // lemma contra los nodos ya persistidos en vez de usar los ids del preview,
+  // que no existen todavía en la base.
   const nodes = await db.nodes.toArray();
   const byLemma = new Map(nodes.map((n) => [n.lemma, n]));
-  const units: { id: string; word: string; kind: "word" | "phrase" }[] = [];
-
-  for (const c of candidates) {
+  const pending = candidates.flatMap((c) => {
     const node = byLemma.get(c.lemma);
-    if (!node) continue;
-    const sense = await db.senses.where("nodeId").equals(node.id!).first();
-    if (sense && sense.translations.length > 0) continue;
-    units.push({ id: `L${String(node.id).padStart(4, "0")}`, word: c.lemma, kind: c.kind });
-  }
-  if (!units.length) return;
+    return node ? [{ id: node.id!, lemma: node.lemma, kind: node.kind }] : [];
+  });
 
   try {
-    const { translateBatch } = await import("../translate");
-    const got = await translateBatch(prefs.llm, units, prefs.targetLang);
-    await db.transaction("rw", db.senses, async () => {
-      for (const [id, translations] of got) {
-        const sense = await db.senses
-          .where("nodeId")
-          .equals(Number(id.slice(1)))
-          .first();
-        if (!sense) continue;
-        const set = new Set(sense.translations);
-        for (const t of translations) set.add(t);
-        await db.senses.update(sense.id!, {
-          translations: [...set],
-          translationSource: set.size === translations.length ? "ai" : sense.translationSource,
-        });
-      }
-    });
-    notify(`Traducidas ${got.size} de ${units.length}.`);
+    const { translated, added } = await fillMissingTranslations(
+      prefs.llm,
+      prefs.targetLang,
+      pending,
+    );
+    if (added) notify(`Traducidas ${translated} palabras (${added} nuevas).`);
   } catch (err) {
     notify(`Traducción interrumpida: ${err instanceof Error ? err.message : String(err)}`);
   }

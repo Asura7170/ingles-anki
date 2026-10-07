@@ -4,6 +4,7 @@ import { db, type Ease } from "../db";
 import { useApp } from "../store";
 import { blankSentence } from "../identity";
 import { speak, stop as stopTts } from "../tts";
+import { makeShortcutHandler, useSentenceTranslation } from "../shortcuts";
 import type { Token } from "../diff";
 
 const BUTTONS: { ease: Ease; label: string; key: string }[] = [
@@ -48,64 +49,32 @@ export default function Study() {
   const hasContext = Boolean(sentence && blank);
 
   // Prefetch de la traducción de la frase: la primera vez que la volteas.
-  useEffect(() => {
-    if (!revealed || !sentence || sense?.sentenceTranslation || !prefs.llm.model) return;
-    let cancelled = false;
-    void (async () => {
-      const { translateSentence } = await import("../translate");
-      try {
-        const t = await translateSentence(prefs.llm, sentence, prefs.targetLang);
-        if (!cancelled && t) {
-          const fresh = await db.senses.where("nodeId").equals(item!.node.id!).first();
-          if (fresh) await db.senses.update(fresh.id!, { sentenceTranslation: t });
-        }
-      } catch {
-        // Sin traducción de frase: la card sigue siendo útil.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [revealed, sentence, sense?.sentenceTranslation, prefs, item]);
+  useSentenceTranslation({
+    revealed,
+    sentence,
+    nodeId: item?.node.id,
+    done: Boolean(sense?.sentenceTranslation),
+    llm: prefs.llm,
+    targetLang: prefs.targetLang,
+  });
 
   const play = (text: string) => void speak(text, { lang: prefs.ttsLang, rate: prefs.ttsRate });
 
+  // Sin array de dependencias a propósito: el handler se relee en cada render
+  // para que `revealed`, `suggested` y `sentence` nunca sean closures rancios.
+  // Con deps, un Enter tras volteararía la card anterior.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      const typing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA";
-
-      if (e.key === "Escape") {
-        stopTts();
-        return;
-      }
-      if (!revealed && (e.key === "Enter" || e.key === " ")) {
-        if (typing && e.key === " " && inputRef.current) return;
-        e.preventDefault();
-        if (typing && e.key === "Enter") inputRef.current?.blur();
-        reveal();
-        return;
-      }
-      if (revealed && e.key === "Enter" && typing) {
-        e.preventDefault();
-        advance(suggested ?? 3);
-        return;
-      }
-      if (revealed && /^[1-4]$/.test(e.key)) {
-        e.preventDefault();
-        advance(Number(e.key) as Ease);
-        return;
-      }
-      if (!typing && (e.key === "r" || e.key === "R")) {
-        e.preventDefault();
-        if (sentence) play(sentence);
-        return;
-      }
-      if (!typing && (e.key === "w" || e.key === "W")) {
-        e.preventDefault();
-        wordRef.current?.click();
-      }
-    };
+    const onKey = makeShortcutHandler({
+      revealed,
+      suggested,
+      sentence,
+      reveal,
+      advance,
+      play,
+      stopTts,
+      inputRef,
+      wordRef,
+    });
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });

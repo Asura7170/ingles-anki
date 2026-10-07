@@ -2,6 +2,7 @@ import { useState } from "react";
 import { db } from "../db";
 import { ingest, hash } from "../ingest";
 import { extractCandidates, loadFrequency, freqRank, type Candidate } from "../identity";
+import { findOrAddSourceText } from "../ingest";
 import { importApkg } from "../apkg";
 import { useApp } from "../store";
 import { scheduleAutoSave } from "../backup";
@@ -210,6 +211,10 @@ export default function Ingest() {
  * `db.nodes`, porque el `byLemma` que resuelve los ids para la exposición sólo
  * existe después de la fusión. Escribir el mazo antes de la exposición dejaría
  * un mazo vacío si `bulkAdd` fallara.
+ *
+ * Y todo el cuerpo va en una transacción: las cuatro escrituras tienen que
+ * caer juntas o no caer, porque el estado intermedio (texto y palabras sin mazo)
+ * es justo el que `purgeOrphanTexts` borra.
  */
 async function createDeckFromText({
   name,
@@ -220,41 +225,44 @@ async function createDeckFromText({
   text: string;
   preview: Candidate[];
 }): Promise<{ created: number; merged: number }> {
-  const sourceTextId = (await db.sourceTexts.add({
-    kind: "text",
-    title: name,
-    body: text,
-    importedAt: Date.now(),
-  }))!;
+  // Una sola transacción: sin ella, un fallo en `exposure.bulkAdd` (cuota)
+  // dejaba nodos, `sources` y transcripción sin mazo que los reclame — y
+  // "Borrar transcripciones huérfanas" de Ajustes convertía eso en pérdida
+  // permanente del texto que el usuario escribió. La transacción propia de
+  // `ingest()` pasa a ser subtransacción porque sus tablas están en
+  // `db.tables`.
+  return db.transaction("rw", db.tables, async () => {
+    const sourceTextId = await findOrAddSourceText(name, text);
 
-  const result = await ingest(
-    preview.map((c) => ({
-      headword: c.headword,
-      lemma: c.lemma,
-      kind: c.kind,
-      occurrences: c.occurrences,
-      examples: c.bestSentence ? [{ text: c.bestSentence }] : undefined,
-    })),
-    { kind: "text", priority: 20, sourceTextId },
-  );
+    const result = await ingest(
+      preview.map((c) => ({
+        headword: c.headword,
+        lemma: c.lemma,
+        kind: c.kind,
+        occurrences: c.occurrences,
+        examples: c.bestSentence ? [{ text: c.bestSentence }] : undefined,
+      })),
+      { kind: "text", priority: 20, sourceTextId },
+    );
 
-  // Exposición pasiva: registro aparte. NUNCA se inyecta al scheduler.
-  const nodes = await db.nodes.toArray();
-  const byLemma = new Map(nodes.map((n) => [n.lemma, n.id!]));
-  const rows = preview
-    .map((c) => ({ nodeId: byLemma.get(c.lemma), occurrences: c.occurrences }))
-    .filter((r): r is { nodeId: number; occurrences: number } => r.nodeId !== undefined)
-    .map((r) => ({ ...r, sourceTextId, ts: Date.now() }));
-  if (rows.length) await db.exposure.bulkAdd(rows);
+    // Exposición pasiva: registro aparte. NUNCA se inyecta al scheduler.
+    const nodes = await db.nodes.toArray();
+    const byLemma = new Map(nodes.map((n) => [n.lemma, n.id!]));
+    const rows = preview
+      .map((c) => ({ nodeId: byLemma.get(c.lemma), occurrences: c.occurrences }))
+      .filter((r): r is { nodeId: number; occurrences: number } => r.nodeId !== undefined)
+      .map((r) => ({ ...r, sourceTextId, ts: Date.now() }));
+    if (rows.length) await db.exposure.bulkAdd(rows);
 
-  await db.decks.add({
-    name,
-    kind: "generated",
-    sourceTextIds: [sourceTextId],
-    createdAt: Date.now(),
+    await db.decks.add({
+      name,
+      kind: "generated",
+      sourceTextIds: [sourceTextId],
+      createdAt: Date.now(),
+    });
+
+    return result;
   });
-
-  return result;
 }
 
 async function translateMissing(

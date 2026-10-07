@@ -1,4 +1,4 @@
-import { db, type Deck, type Example, type Node } from "./db";
+import { db, type Deck, type Example, type Node, type Source } from "./db";
 import { retrievability } from "./srs";
 
 /** Un deck es una query sobre el pool de nodos. Nunca contiene cards. */
@@ -9,16 +9,29 @@ export interface StudyItem {
   sentence?: string;
 }
 
+/**
+ * ¿De qué mazo es esta palabra? Un mazo importado se localiza por `deckId`; uno
+ * generado, por el `sourceTextId` que guarda en `sourceTextIds`. Exportado para
+ * que el borrado use el mismo criterio que la lectura: duplicar esta regla era
+ * la forma más corta de que "borrar un mazo" no encontrara sus propias palabras.
+ */
+export function belongsToDeck(source: Source, deck: Deck): boolean {
+  if (deck.kind === "import") return source.deckId === deck.id;
+  // Una fila con `deckId` pertenece a un mazo importado por definición: un mazo
+  // no importado no puede reclamarla, o borrarlo borraría las palabras de
+  // aquel. Sólo un backup restaurado a mano produce una fila así —`importFromFile`
+  // no valida nada— y sin este guard leer y borrar discrepaban: el recuento la
+  // contaba para el generado y la cascada la destruía al borrar el importado.
+  if (source.deckId !== undefined) return false;
+  if (deck.sourceTextIds?.length) {
+    return source.sourceTextId != null && deck.sourceTextIds.includes(source.sourceTextId);
+  }
+  return false;
+}
+
 export async function deckNodeIds(deck: Deck): Promise<number[]> {
   const sources = await db.sources.toArray();
-  const relevant = sources.filter((s) => {
-    if (deck.kind === "import") return s.deckId === deck.id;
-    if (deck.sourceTextIds?.length) {
-      return s.sourceTextId != null && deck.sourceTextIds.includes(s.sourceTextId);
-    }
-    return false;
-  });
-  return [...new Set(relevant.map((s) => s.nodeId))];
+  return [...new Set(sources.filter((s) => belongsToDeck(s, deck)).map((s) => s.nodeId))];
 }
 
 export interface DeckStats {
@@ -32,20 +45,14 @@ export interface DeckStats {
 /** Una palabra es "nueva" si FSRS nunca la ha visto: sin card o en estado New. */
 const isNew = (n: Node) => !n.card || n.card.state === 0;
 
-/** Sin `dailyNewLimit` explícito, 20 nuevas por sesión. Lo ve también la UI. */
-export const DEFAULT_DAILY_NEW_LIMIT = 20;
+const EMPTY_STATS: DeckStats = { total: 0, known: 0, learning: 0, due: 0, fresh: 0 };
 
-export async function deckStats(deck: Deck, now = Date.now()): Promise<DeckStats> {
-  const ids = await deckNodeIds(deck);
-  if (!ids.length) return { total: 0, known: 0, learning: 0, due: 0, fresh: 0 };
-
-  const nodes = await db.nodes.where("id").anyOf(ids).toArray();
-  const scoped = nodes.filter((n) => !deck.wordKinds || deck.wordKinds.includes(n.kind));
-  const unseen = scoped.filter((n) => !n.known);
-
+/** Recuento de una lista de nodos ya filtrada por `wordKinds`. */
+function countStats(nodes: Node[], now: number): DeckStats {
+  const unseen = nodes.filter((n) => !n.known);
   return {
-    total: scoped.length,
-    known: scoped.length - unseen.length,
+    total: nodes.length,
+    known: nodes.length - unseen.length,
     learning: unseen.filter((n) => !isNew(n)).length,
     due: unseen.filter((n) => !isNew(n) && n.due <= now).length,
     fresh: unseen.filter(isNew).length,
@@ -53,11 +60,71 @@ export async function deckStats(deck: Deck, now = Date.now()): Promise<DeckStats
 }
 
 /**
+ * Estadísticas de todos los mazos con DOS lecturas: una de `sources` y otra de
+ * `nodes`. Antes cada `DeckCard` abría su propio `useLiveQuery`, así que con 20
+ * mazos había 20 escaneos completos de `sources` y 20 suscripciones vivas que
+ * se relanzaban en cada cambio de un nodo.
+ *
+ * Una fuente puede pertenecer a varios mazos a la vez, y por eso no hay `break`
+ * en el bucle interno: se añade a todos los que le corresponden.
+ */
+export async function allDeckStats(
+  decks: Deck[],
+  now = Date.now(),
+): Promise<Map<number, DeckStats>> {
+  const out = new Map<number, DeckStats>();
+  // Copia, no el singleton: `EMPTY_STATS` es un objeto de módulo y sale por un
+  // retorno público; una futura `stats.total = x` lo corrompería para todos los
+  // mazos vacíos a la vez.
+  for (const d of decks) if (d.id !== undefined) out.set(d.id, { ...EMPTY_STATS });
+  if (!decks.length) return out;
+
+  const idsByDeck = new Map<number, Set<number>>();
+  for (const s of await db.sources.toArray()) {
+    for (const d of decks) {
+      if (d.id === undefined || !belongsToDeck(s, d)) continue;
+      const set = idsByDeck.get(d.id) ?? new Set<number>();
+      set.add(s.nodeId);
+      idsByDeck.set(d.id, set);
+    }
+  }
+
+  const wanted = [...new Set([...idsByDeck.values()].flatMap((s) => [...s]))];
+  const nodes = wanted.length ? await db.nodes.where("id").anyOf(wanted).toArray() : [];
+  const byId = new Map(nodes.map((n) => [n.id!, n]));
+
+  for (const [deckId, set] of idsByDeck) {
+    const deck = decks.find((d) => d.id === deckId)!;
+    const scoped = [...set]
+      .map((id) => byId.get(id))
+      .filter((n): n is Node => n !== undefined)
+      .filter((n) => !deck.wordKinds || deck.wordKinds.includes(n.kind));
+    out.set(deckId, countStats(scoped, now));
+  }
+  return out;
+}
+
+/** Azúcar sobre `allDeckStats` para cuando sólo interesa un mazo (tests, CLI). */
+export async function deckStats(deck: Deck, now = Date.now()): Promise<DeckStats> {
+  if (deck.id === undefined) return { ...EMPTY_STATS };
+  return (await allDeckStats([deck], now)).get(deck.id) ?? { ...EMPTY_STATS };
+}
+
+/**
  * Cola de sesión: repasos vencidos primero ordenados por retrievability
  * ascendente ("lo que más se me está olvidando"), después las nuevas limitadas
- * por `dailyNewLimit`. El límite NO toca el SRS: sólo difiere las nuevas.
+ * por `newLimit`. El límite NO toca el SRS: sólo difiere las nuevas.
+ *
+ * El límite viene como parámetro y no como campo del mazo a propósito: es una
+ * preferencia global (Ajustes), y leerlo de dos sitios fue un bug: la tarjeta
+ * contaba con `deck.dailyNewLimit` mientras `startSession` sobrescribía con
+ * `prefs.dailyNewLimit`, así que el botón prometía una cola que no llegaba.
  */
-export async function buildQueue(deck: Deck, now = Date.now()): Promise<StudyItem[]> {
+export async function buildQueue(
+  deck: Deck,
+  newLimit: number,
+  now = Date.now(),
+): Promise<StudyItem[]> {
   const ids = await deckNodeIds(deck);
   if (!ids.length) return [];
 
@@ -70,7 +137,11 @@ export async function buildQueue(deck: Deck, now = Date.now()): Promise<StudyIte
     .filter((n) => !isNew(n) && n.due <= now)
     .sort((a, b) => retrievability(a.card, now) - retrievability(b.card, now));
 
-  const limit = deck.dailyNewLimit ?? DEFAULT_DAILY_NEW_LIMIT;
+  // El límite viene de IndexedDB con un cast sin comprobar (`getSetting`), así
+  // que un backup editado a mano puede traer `NaN` o un negativo: `slice(0, NaN)`
+  // no da nada y `slice(0, -1)` quita la última. El slider de Ajustes ya lo
+  // acota; esto es el límite de confianza.
+  const limit = Number.isFinite(newLimit) ? Math.max(0, Math.floor(newLimit)) : 0;
   const fresh = eligible.filter(isNew).slice(0, limit);
   const queue = [...reviews, ...fresh];
 

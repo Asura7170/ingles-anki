@@ -101,9 +101,12 @@ export async function regrantBackup(): Promise<PermissionState> {
  * borra la base si falla: degrada a export manual y avisa.
  */
 export async function autoSave(): Promise<"written" | "degraded" | "absent"> {
-  const handle = await getSetting<FsaHandle | null>(HANDLE_KEY, null);
-  if (!handle) return "absent";
   try {
+    // El `getSetting` va dentro del try a propósito: si la base está cerrada
+    // lanza, y como `scheduleAutoSave` dispara sin `await` eso se convertía en
+    // un rechazo sin capturar. Borrar datos la dispara en el camino de salida.
+    const handle = await getSetting<FsaHandle | null>(HANDLE_KEY, null);
+    if (!handle) return "absent";
     if ((await handle.queryPermission({ mode: "readwrite" })) !== "granted") return "degraded";
     const writable = await handle.createWritable();
     await writable.write(JSON.stringify(await buildDump()));

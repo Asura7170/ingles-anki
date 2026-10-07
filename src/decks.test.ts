@@ -1,9 +1,10 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { IDBFactory } from "fake-indexeddb";
-import { db } from "./db";
+import { db, type Deck } from "./db";
 import { ingest, markSourceKnown, type IngestItem } from "./ingest";
-import { buildQueue, deckNodeIds, deckStats, type StudyItem } from "./decks";
+import { allDeckStats, buildQueue, deckNodeIds, deckStats, type StudyItem } from "./decks";
+import { deleteDeck } from "./purge";
 import { review, retrievability, newCard } from "./srs";
 
 /**
@@ -14,6 +15,8 @@ import { review, retrievability, newCard } from "./srs";
 
 const NOW = Date.UTC(2026, 0, 15);
 const day = 86_400_000;
+/** Límite de nuevas holgado: estos tests miran el contenido, no el recorte. */
+const LIM = 20;
 
 const item = (lemma: string, extra: Partial<IngestItem> = {}): IngestItem => ({
   headword: lemma,
@@ -91,7 +94,7 @@ describe("deckNodeIds", () => {
   });
 });
 
-describe("deckStats", () => {
+describe("allDeckStats", () => {
   it("cuenta known, learning, due y fresh", async () => {
     const deckId = await seedDeck("A", ["run", "study", "child"]);
 
@@ -119,20 +122,55 @@ describe("deckStats", () => {
       fresh: 0,
     });
   });
+
+  it("varios mazos de golpe, y una palabra compartida cuenta en los dos", async () => {
+    const a = await seedDeck("A", ["run"]);
+    const b = await seedDeck("B", ["run", "study"]);
+
+    const all = await allDeckStats([
+      { name: "A", kind: "import", createdAt: NOW, id: a },
+      { name: "B", kind: "import", createdAt: NOW, id: b },
+    ]);
+
+    // Ésta es la razón de no haber `break` en el bucle interno: "run" tiene dos
+    // filas en `sources` y pertenece a los dos mazos.
+    expect(all.get(a!)!.total).toBe(1);
+    expect(all.get(b!)!.total).toBe(2);
+  });
+
+  it("un mazo sin id no entra en el mapa", async () => {
+    const out = await allDeckStats([{ name: "S", kind: "import", createdAt: NOW }]);
+    expect(out.size).toBe(0);
+  });
+
+  it("lista vacía no lee la base", async () => {
+    expect((await allDeckStats([])).size).toBe(0);
+  });
+
+  it("un mazo generado cuenta por sourceTextId, no por deckId", async () => {
+    const sourceTextId = (await db.sourceTexts.add({
+      kind: "text",
+      title: "T",
+      body: "x",
+      importedAt: NOW,
+    }))!;
+    await ingest([item("run")], { kind: "text", priority: 20, sourceTextId });
+    const g: Deck = {
+      name: "G",
+      kind: "generated",
+      sourceTextIds: [sourceTextId],
+      createdAt: NOW,
+      id: 99,
+    };
+
+    expect((await allDeckStats([g])).get(99)!.total).toBe(1);
+  });
 });
 
 describe("buildQueue — el límite de nuevas NO toca el SRS", () => {
   it("descarta las nuevas por encima del límite pero no las marca como repasadas", async () => {
     const deckId = await seedDeck("A", ["a1", "b1", "c1"]);
-    const deck = {
-      name: "A",
-      kind: "import" as const,
-      createdAt: NOW,
-      id: deckId,
-      dailyNewLimit: 2,
-    };
-
-    const q = await buildQueue(deck);
+    const q = await buildQueue({ name: "A", kind: "import", createdAt: NOW, id: deckId }, 2, NOW);
     expect(q).toHaveLength(2);
 
     // La tercera sigue nueva: no se consumió un repaso por haberla limitado.
@@ -145,13 +183,7 @@ describe("buildQueue — el límite de nuevas NO toca el SRS", () => {
     const a = (await db.nodes.where("lemma").equals("a1").first())!;
     await db.nodes.update(a.id!, { card: review(a.card, 3, NOW), due: NOW - 1 });
 
-    const q = await buildQueue({
-      name: "A",
-      kind: "import" as const,
-      createdAt: NOW,
-      id: deckId,
-      dailyNewLimit: 1,
-    });
+    const q = await buildQueue({ name: "A", kind: "import", createdAt: NOW, id: deckId }, 1, NOW);
     expect(q.map((i) => i.node.lemma)).toContain("a1");
   });
 });
@@ -161,7 +193,10 @@ describe("buildQueue — las palabras conocidas no entran", () => {
     const deckId = await seedDeck("A", ["run", "study"]);
     await markSourceKnown((s) => s.deckId === deckId && s.noteId === 1);
 
-    const q = await buildQueue({ name: "A", kind: "import" as const, createdAt: NOW, id: deckId });
+    const q = await buildQueue(
+      { name: "A", kind: "import" as const, createdAt: NOW, id: deckId },
+      LIM,
+    );
     expect(q.map((i) => i.node.lemma)).toEqual(["study"]);
   });
 });
@@ -185,7 +220,10 @@ describe("buildQueue — orden por retrievability", () => {
 
     expect(retrievability(fCard, NOW)).toBeLessThan(retrievability(sCard, NOW));
 
-    const q = await buildQueue({ name: "A", kind: "import" as const, createdAt: NOW, id: deckId });
+    const q = await buildQueue(
+      { name: "A", kind: "import" as const, createdAt: NOW, id: deckId },
+      LIM,
+    );
     const order = q.map((i) => i.node.lemma);
     expect(order.indexOf("frail")).toBeLessThan(order.indexOf("solid"));
   });
@@ -203,7 +241,10 @@ describe("buildQueue — orden por retrievability", () => {
     const due = (await db.nodes.where("lemma").equals("due1").first())!;
     await db.nodes.update(due.id!, { card: review(due.card, 3, NOW), due: NOW - day });
 
-    const q = await buildQueue({ name: "A", kind: "import" as const, createdAt: NOW, id: deckId });
+    const q = await buildQueue(
+      { name: "A", kind: "import" as const, createdAt: NOW, id: deckId },
+      LIM,
+    );
     expect(q.map((i) => i.node.lemma)).toEqual(["due1", "new1"]);
   });
 });
@@ -221,18 +262,19 @@ describe("buildQueue — la frase más corta acompaña a la palabra", () => {
       { nodeId: node.id!, text: "They ran.", sourceId: null },
     ]);
 
-    const q: StudyItem[] = await buildQueue({
-      name: "A",
-      kind: "import" as const,
-      createdAt: NOW,
-      id: deckId,
-    });
+    const q: StudyItem[] = await buildQueue(
+      { name: "A", kind: "import", createdAt: NOW, id: deckId },
+      LIM,
+    );
     expect(q[0]!.sentence).toBe("They ran.");
   });
 
   it("palabra sin ejemplo → sentence undefined, no crash", async () => {
     const deckId = await seedDeck("A", ["run"]);
-    const q = await buildQueue({ name: "A", kind: "import" as const, createdAt: NOW, id: deckId });
+    const q = await buildQueue(
+      { name: "A", kind: "import" as const, createdAt: NOW, id: deckId },
+      LIM,
+    );
     expect(q[0]!.sentence).toBeUndefined();
   });
 });
@@ -251,7 +293,10 @@ describe("el SRS es global, no por deck", () => {
     expect(await db.sources.filter((s) => s.deckId === a || s.deckId === b).count()).toBe(2);
 
     // Estudiar en A actualiza el nodo, y B ve exactamente ese mismo historial.
-    const inB = await buildQueue({ name: "B", kind: "import" as const, createdAt: NOW, id: b });
+    const inB = await buildQueue(
+      { name: "B", kind: "import" as const, createdAt: NOW, id: b },
+      LIM,
+    );
     expect(inB.map((i) => i.node.lemma)).toEqual(["run"]);
     expect(inB[0]!.node.card!.reps).toBe(1);
     expect(retrievability(inB[0]!.node.card, now())).toBeGreaterThan(0);
@@ -267,28 +312,32 @@ describe("el SRS es global, no por deck", () => {
     await db.nodes.update(node.id!, { card, due: card.due.getTime() });
 
     expect(
-      await buildQueue({ name: "A", kind: "import" as const, createdAt: NOW, id: a }),
+      await buildQueue({ name: "A", kind: "import" as const, createdAt: NOW, id: a }, LIM),
     ).toHaveLength(0);
     expect(
-      await buildQueue({ name: "B", kind: "import" as const, createdAt: NOW, id: b }),
+      await buildQueue({ name: "B", kind: "import" as const, createdAt: NOW, id: b }, LIM),
     ).toHaveLength(0);
   });
 });
 
 describe("aislar un mazo no destruye progreso", () => {
-  it("borrar el deck deja la palabra con su historial intacto", async () => {
-    const deckId = await seedDeck("A", ["run"]);
+  // Esta regla cambió: borrar un mazo borra sus palabras huérfanas. El SRS sigue
+  // siendo global —lo que se conserva es la palabra compartida, no la del mazo
+  // que se borra— pero "aislar un mazo" ya no es dejar la palabra intacta.
+  // La cobertura de la regla nueva está en `purge.test.ts`.
+  it("la palabra de otro mazo conserva su historial al borrar uno de los suyos", async () => {
+    const a = await seedDeck("A", ["run"]);
+    const b = await seedDeck("B", ["run"]);
     const node = (await db.nodes.where("lemma").equals("run").first())!;
     const card = review(node.card, 3, NOW);
     await db.nodes.update(node.id!, { card, due: card.due.getTime() });
 
-    await db.transaction("rw", db.decks, db.sources, async () => {
-      await db.sources.where("deckId").equals(deckId).delete();
-      await db.decks.delete(deckId);
-    });
+    await deleteDeck({ name: "A", kind: "import", createdAt: NOW, id: a });
 
+    // Sigue viva porque B también la tiene: un solo nodo, un solo historial.
     const after = await db.nodes.where("lemma").equals("run").first();
     expect(after!.card!.reps).toBe(1);
     expect(after!.due).toBe(card.due.getTime());
+    expect(await db.sources.filter((s) => s.deckId === b).count()).toBe(1);
   });
 });

@@ -111,8 +111,16 @@ export function resolveImages(
   return { images, skipped };
 }
 
-export async function importApkg(file: File): Promise<ApkgImport> {
-  const raw = await runWorker(await file.arrayBuffer());
+export async function importApkg(
+  file: File,
+  parse: (buffer: ArrayBuffer) => Promise<ApkgOut> = runWorker,
+): Promise<ApkgImport> {
+  // `parse` inyectable: en producción es el worker (sql.js vive allí para no
+  // arrastrar el WASM al hilo principal); en tests se pasa `parseApkgBytes`
+  // directo, que es la misma función que el worker ejecuta. Sin el seam,
+  // `importApkg` sólo se podría probar con un Worker real, que ni happy-dom
+  // ni Node exponen.
+  const raw = await parse(await file.arrayBuffer());
   if (!raw.ok) throw new Error(raw.error);
   if (raw.notes.length === 0) throw new Error("El mazo no contiene notas.");
 

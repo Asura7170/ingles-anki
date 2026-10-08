@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, type Ease } from "../db";
 import { useApp } from "../store";
-import { blankSentence } from "../identity";
+import { blankSentence, expectedWord } from "../identity";
 import { speak, stop as stopTts } from "../tts";
 import CardImage from "./CardImage";
 import { makeShortcutHandler, useSentenceTranslation } from "../shortcuts";
@@ -156,7 +156,7 @@ export default function Study() {
             <Revealed
               comparison={comparison}
               typed={typed}
-              answer={node.lemma}
+              answer={expectedWord(node, sentence)}
               translations={translations}
               sentence={sentence}
               sentenceTranslation={sense?.sentenceTranslation}

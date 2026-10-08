@@ -465,21 +465,36 @@ export function extractCandidates(text: string): Candidate[] {
 
 /**
  * Localiza la palabra dentro de la frase y devuelve las dos mitades para poder
- * dibujar el hueco. Usa `identify` para que la flexión coincida (`running` con
- * lemma `run`).
+ * dibujar el hueco, MÁS el token original: la respuesta esperada es la forma
+ * de la frase ("cries"), no el lemma ("cry"). Usa `identify` para que la
+ * flexión coincida (`running` con lemma `run`).
  */
 export function blankSentence(
   sentence: string,
   node: { lemma: string },
-): { before: string; after: string } | null {
+): { before: string; word: string; after: string } | null {
   const tokens = sentence.split(/(\s+)/);
   for (let i = 0; i < tokens.length; i++) {
     const id = identify(tokens[i]!);
     if (id?.lemma === node.lemma) {
-      return { before: tokens.slice(0, i).join(""), after: tokens.slice(i + 1).join("") };
+      return {
+        before: tokens.slice(0, i).join(""),
+        word: tokens[i]!,
+        after: tokens.slice(i + 1).join(""),
+      };
     }
   }
   return null;
+}
+
+/**
+ * Lo que la card espera: la palabra tal como aparece en la frase, o el lemma
+ * si no hay frase (o no hay hueco). Fuente única para calificar (store) y
+ * mostrar (Study): dos cálculos acabarian divergiendo.
+ */
+export function expectedWord(node: { lemma: string }, sentence?: string): string {
+  if (!sentence) return node.lemma;
+  return blankSentence(sentence, node)?.word ?? node.lemma;
 }
 
 /**

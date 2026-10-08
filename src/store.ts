@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { db, getSetting, setSetting, type Deck, type Ease } from "./db";
 import { scheduleAutoSave } from "./backup";
-import { loadFrequency } from "./identity";
+import { expectedWord, loadFrequency } from "./identity";
 import { newCard, review as srsReview } from "./srs";
 import { gradeTyping, hasTypingContext } from "./grade";
 import { buildQueue, type StudyItem } from "./decks";
@@ -136,7 +136,11 @@ export const useApp = create<AppState>((set, get) => ({
       return;
     }
 
-    const { comparison, suggested } = gradeTyping(item.node.lemma, typed, prefs.threshold);
+    const { comparison, suggested } = gradeTyping(
+      expectedWord(item.node, item.sentence),
+      typed,
+      prefs.threshold,
+    );
     set({ revealed: true, comparison, suggested, typingHint: false });
   },
 

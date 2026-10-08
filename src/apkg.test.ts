@@ -110,6 +110,47 @@ describe("importApkg sin worker", () => {
     const plain = (await db.nodes.where("lemma").equals("study").first())!;
     expect(await db.media.where("nodeId").equals(plain.id!).count()).toBe(0);
   });
+
+  it("campo-código primero: la palabra es el campo 1, no el ID", async () => {
+    // Mazos como "1000 Basic English Words" traen un ID en el campo 0
+    // ("1000BEW_B01_U01_001") y la palabra en el 1. Sin el salto, el ID
+    // acababa de lemma y el mazo entero era basura.
+    const dbh = new SQL.Database();
+    dbh.run(`CREATE TABLE col (id INTEGER PRIMARY KEY, models TEXT, decks TEXT)`);
+    dbh.run(
+      `CREATE TABLE notes (id INTEGER PRIMARY KEY, nid INTEGER, mid INTEGER, mod INTEGER, usn INTEGER, tags TEXT, flds TEXT, sfld INTEGER, csum INTEGER, flags INTEGER, data TEXT)`,
+    );
+    dbh.run(
+      `CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER, ord INTEGER, mod INTEGER, type INTEGER, queue INTEGER, due INTEGER, ivl INTEGER, factor INTEGER, reps INTEGER, lapses INTEGER, left INTEGER, odue INTEGER, odid INTEGER, flags INTEGER, data TEXT)`,
+    );
+    dbh.run(`INSERT INTO col VALUES (1, '{}', ?)`, [
+      JSON.stringify({ 2: { name: "1000 Basic English Words" } }),
+    ]);
+    const flds = [
+      "1000BEW_B01_U01_001",
+      "cry",
+      "krái",
+      "verb",
+      "to show sadness",
+      "He cries when he is sad.",
+    ].join("\x1f");
+    dbh.run(`INSERT INTO notes (id, nid, mid, mod, usn, tags, flds) VALUES (1,1,1,0,0,'',?)`, [
+      flds,
+    ]);
+    dbh.run(`INSERT INTO cards (id, nid, did, ord) VALUES (1,1,2,0)`);
+    const zip = zipSync({
+      "collection.anki2": new Uint8Array(dbh.export()),
+      media: new TextEncoder().encode("{}"),
+    });
+    dbh.close();
+
+    const r = await importApkg(asFile(zip), direct);
+    expect(r.deckName).toBe("1000 Basic English Words");
+    expect(r.result.created).toBe(1);
+    expect(await db.nodes.where("lemma").equals("cry").first()).toBeTruthy();
+    // El código no crea nodo: un solo lemma en la base.
+    expect(await db.nodes.count()).toBe(1);
+  });
 });
 
 describe("contrato del mensaje worker → main", () => {

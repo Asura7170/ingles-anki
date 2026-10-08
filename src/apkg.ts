@@ -38,9 +38,18 @@ function runWorker(buffer: ArrayBuffer): Promise<ApkgOut> {
 }
 
 /**
- * Mapeo heurístico de campos. field[0] = palabra; el campo más largo con >=5
- * palabras = ejemplo; el resto = traducciones. Los .apkg no tienen contrato
- * sobre qué campo es qué, así que esto es mejor que nada y no peor.
+ * El campo 0 a veces es un código ("1000BEW_B01_U01_001"), no la palabra.
+ * Con minúsculas no es código ("COVID-19", "Chapter 5" se quedan); sin
+ * dígito tampoco ("TV" se queda). Heurística, como todo en esta función.
+ */
+const isCode = (f: string) =>
+  /\d/.test(f) && !/[a-z]/.test(f) && (f.includes("_") || /^[\d]/.test(f));
+
+/**
+ * Mapeo heurístico de campos. field[0] = palabra (o el primer campo que no
+ * sea código); el campo más largo con >=5 palabras = ejemplo; el resto =
+ * traducciones. Los .apkg no tienen contrato sobre qué campo es qué, así
+ * que esto es mejor que nada y no peor.
  */
 function mapFields(fields: string[]): {
   headword: string;
@@ -48,8 +57,12 @@ function mapFields(fields: string[]): {
   example?: string;
 } {
   const clean = fields.filter(Boolean);
-  const headword = clean[0] ?? "";
-  const rest = clean.slice(1);
+  // Salta códigos iniciales: el ID va primero y la palabra después. El tope
+  // guarda el último: si TODO son códigos, headword es el último y no "".
+  let start = 0;
+  while (start < clean.length - 1 && isCode(clean[start]!)) start++;
+  const headword = clean[start] ?? "";
+  const rest = clean.filter((_, i) => i !== start);
 
   let example = "";
   let exampleIdx = -1;

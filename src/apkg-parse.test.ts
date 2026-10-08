@@ -4,6 +4,9 @@ import initSqlJs from "sql.js";
 import { rootOf } from "./apkg-format";
 import { parseApkgBytes } from "./apkg-parse";
 
+const hexToBytes = (hex: string) =>
+  new Uint8Array((hex.match(/../g) ?? []).map((h) => parseInt(h, 16)));
+
 /**
  * El worker original hacía `SELECT id, flds FROM notes` — no `nid`, que no existe
  * en el esquema de Anki. Este archivo reconstruye un .apkg real para fijar ese
@@ -36,6 +39,12 @@ function buildApkg(opts: {
   schema18?: boolean;
   /** JSON de col.decks roto, para el camino de degradación. */
   brokenDecksJson?: boolean;
+  /**
+   * `true` = layout v3 (Anki 23.10+): la real es `collection.anki21b`, y el
+   * exportador escribe además un `collection.anki2` DUMMY. Por defecto legacy:
+   * la real es `collection.anki2`.
+   */
+  v3?: boolean;
 }): Uint8Array {
   const db = new SQL.Database();
 
@@ -71,10 +80,37 @@ function buildApkg(opts: {
   }
 
   // `export()` antes de `close()`: una base cerrada devuelve un buffer vacío.
-  const exported = db.export();
+  const exported = new Uint8Array(db.export());
   db.close();
+
+  if (!opts.v3) {
+    return zipSync({ "collection.anki2": exported, media: new TextEncoder().encode("{}") });
+  }
+
+  // Layout v3: la real es anki21b y el anki2 es un dummy con una sola nota que
+  // dice "This file requires a newer version of Anki." — igual que hace
+  // `write_dummy_collection` en el exportador de Anki. Con esquema completo
+  // (col incluida): un dummy sin tablas no es una base válida y el fallback
+  // del lector reventaría en `readDeckNames` en vez de devolver la nota.
+  const dummy = new SQL.Database();
+  dummy.run(`CREATE TABLE col (id INTEGER PRIMARY KEY, models TEXT, decks TEXT)`);
+  dummy.run(`INSERT INTO col VALUES (1, '{}', '{}')`);
+  dummy.run(
+    `CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER, ord INTEGER, mod INTEGER, type INTEGER, queue INTEGER, due INTEGER, ivl INTEGER, factor INTEGER, reps INTEGER, lapses INTEGER, left INTEGER, odue INTEGER, odid INTEGER, flags INTEGER, data TEXT)`,
+  );
+  dummy.run(
+    `CREATE TABLE notes (id INTEGER PRIMARY KEY, nid INTEGER, mid INTEGER, mod INTEGER, usn INTEGER, tags TEXT, flds TEXT, sfld INTEGER, csum INTEGER, flags INTEGER, data TEXT)`,
+  );
+  dummy.run(`INSERT INTO notes (id, nid, mid, mod, usn, tags, flds) VALUES (1,1,1,0,0,'',?)`, [
+    ["", "This file requires a newer version of Anki."].join("\x1f"),
+  ]);
+  const dummyBytes = new Uint8Array(dummy.export());
+  dummy.close();
+
   return zipSync({
-    "collection.anki2": new Uint8Array(exported),
+    meta: new Uint8Array([0x08, 0x03]), // PackageMetadata{ version: 3 }
+    "collection.anki21b": exported,
+    "collection.anki2": dummyBytes,
     media: new TextEncoder().encode("{}"),
   });
 }
@@ -151,8 +187,290 @@ describe("el .apkg se parsea", () => {
     expect(() => parse(roto)).toThrow(/collection\.anki2/);
   });
 
+  // --- media ---------------------------------------------------------------
+  //
+  // El mapa `media` es índice-en-zip → nombre. Las entradas del zip se llaman
+  // SIEMPRE por índice, nunca por nombre, así que el nombre real hay que
+  // resolverlo por el mapa.
+  const CAT = new Uint8Array([0x89, 0x50, 0x4e, 0x47]); // cabecera PNG
+  const DOG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x42]);
+
+  /**
+   * `MediaEntries{ entries: [MediaEntry{name,size,sha1}, …] }` en hexadecimal.
+   * Un `repeated` en protobuf son N campos sueltos con la misma etiqueta, NO
+   * un envoltorio único: cada entrada lleva su propio tag+longitud. Dos
+   * entradas a propósito, y la segunda con un espacio en el nombre, que es
+   * justo el caso que rompía el folklore del percent-encoding.
+   */
+  // Cada entrada: tag exterior 0x0a + longitud del entry entero + entry.
+  // Sin ese envoltorio el parser lee el tag del `name` como si fuese el del
+  // entry y el mapa sale vacío — que es exactamente lo que pasó al escribir
+  // este fixture la primera vez.
+  const CAT_ENTRY = "0a07" + "6361742e6a7067" + "10e20a" + "1a14" + "01".repeat(20); // 34 B
+  const DOG_ENTRY =
+    "0a10" + "646f6720616e6420626f6e652e706e67" + "108010" + "1a14" + "02".repeat(20); // 43 B
+  const PROTO = hexToBytes("0a22" + CAT_ENTRY + "0a2b" + DOG_ENTRY);
+
+  /**
+   * Envoltura zstd mínima, hecha a mano porque `fzstd` sólo descomprime.
+   * Magic + descriptor (single-segment, FCS de 4 bytes) + tamaño + un bloque
+   * RAW con Last_Block=1. Es el mismo formato que emite el exportador de Anki.
+   *
+   * `declared` permite mentir en el FCS: por defecto dice la verdad (el tamaño
+   * real), pero un frame corrupto o malicioso puede declarar 2 MiB con 4 bytes
+   * de payload. fzstd asigna por lo declarado.
+   */
+  const zstdRaw = (payload: Uint8Array, declared: number = payload.length): Uint8Array => {
+    const n = payload.length;
+    // magic(4) + descriptor(1) + FCS(4) + Block_Header(3).
+    const header = new Uint8Array(12);
+    header.set([0x28, 0xb5, 0x2f, 0xfd, 0xa0], 0);
+    new DataView(header.buffer).setUint32(5, declared, true);
+    const bh = (n << 3) | 1; // Last_Block=1, tipo 0 (RAW), tamaño REAL
+    header[9] = bh & 0xff;
+    header[10] = (bh >>> 8) & 0xff;
+    header[11] = (bh >>> 16) & 0xff;
+    return new Uint8Array([...header, ...payload]);
+  };
+
+  /** Re-empaqueta el mapa y las entradas de media como los escribe Anki. */
+  function withMedia(
+    opts: Parameters<typeof buildApkg>[0],
+    media: { map: Uint8Array; files: Record<string, Uint8Array> },
+  ): Uint8Array {
+    return zipSync({ ...unzipSync(buildApkg(opts)), media: media.map, ...media.files });
+  }
+
+  it("legacy: resuelve <img> a su entrada del zip por el mapa media", () => {
+    const r = parse(
+      withMedia(
+        {
+          notes: [
+            [1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2],
+            [2, ['<img src="dog and bone.png">', "perro", "The dog barks."].join("\x1f"), 2],
+          ],
+        },
+        {
+          map: new TextEncoder().encode('{"0":"cat.jpg","1":"dog and bone.png"}'),
+          files: { "0": CAT, "1": DOG },
+        },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes[0]!.images).toEqual(["cat.jpg"]);
+    expect(r.notes[1]!.images).toEqual(["dog and bone.png"]);
+    // El nombre del zip es el índice; `media` es quien traduce.
+    expect(r.media["cat.jpg"]).toEqual(CAT);
+    expect(r.media["dog and bone.png"]).toEqual(DOG);
+    // Y el texto sigue limpio: la imagen se extrae aparte, no ensucia el campo.
+    expect(r.notes[0]!.fields[0]).toBe("");
+  });
+
+  it("lo que ninguna nota referencia no viaja: ni se descomprime ni se clona", () => {
+    // El mapa nombra TODO el media del mazo (el audio incluido, que
+    // `findImages` ni mira). Antes todo se descomprimía y se mandaba al hilo
+    // principal; ahora solo lo referenciado.
+    const r = parse(
+      withMedia(
+        { notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]] },
+        {
+          map: new TextEncoder().encode('{"0":"cat.jpg","1":"dog and bone.png"}'),
+          files: { "0": CAT, "1": DOG },
+        },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(Object.keys(r.media)).toEqual(["cat.jpg"]);
+  });
+
+  it("v3: el mapa media es zstd+protobuf, no JSON", () => {
+    const r = parse(
+      withMedia(
+        {
+          notes: [
+            [1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2],
+            [2, ['<img src="dog and bone.png">', "perro", "The dog barks."].join("\x1f"), 2],
+          ],
+          v3: true,
+        },
+        { map: zstdRaw(PROTO), files: { "0": CAT, "1": DOG } },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes[0]!.images).toEqual(["cat.jpg"]);
+    // Orden del vector = índice, sin campo índice: la segunda entrada es el "1".
+    expect(r.media["cat.jpg"]).toEqual(CAT);
+    expect(r.media["dog and bone.png"]).toEqual(DOG);
+  });
+
+  it("recoge el <img> de todos los campos, no sólo del ejemplo", () => {
+    // La imagen es de la palabra, no de la frase. Y si el texto de la frase
+    // llevara el <img>, `blankSentence` trocearía por espacios y `identify`
+    // devolvería null en "<img": el clo se rompería. Por eso se extrae antes
+    // de stripHtml y en todos los campos.
+    const r = parse(
+      withMedia(
+        {
+          notes: [
+            [1, ['<img src="cat.jpg">', "gato", 'A <img src="cat.jpg"> sleeps.'].join("\x1f"), 2],
+          ],
+        },
+        { map: new TextEncoder().encode('{"0":"cat.jpg"}'), files: { "0": CAT } },
+      ),
+    );
+    expect(r.notes[0]!.images).toEqual(["cat.jpg"]); // dedup, no dos veces
+    expect(r.notes[0]!.fields[2]).toBe("A sleeps.");
+  });
+
+  it("sin fichero media no es error: se importa sin imágenes", () => {
+    const r = parse(
+      zipSync({ "collection.anki2": unzipSync(buildApkg({ notes: SAMPLE }))["collection.anki2"]! }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes).toHaveLength(3);
+    expect(r.media).toEqual({});
+  });
+
+  it("<img> que el mapa no resuelve se degrada sin romper la importación", () => {
+    const r = parse(
+      withMedia(
+        { notes: [[1, ['<img src="fantasma.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]] },
+        { map: new TextEncoder().encode('{"0":"cat.jpg"}'), files: { "0": CAT } },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes).toHaveLength(1);
+    expect(r.media["fantasma.jpg"]).toBeUndefined();
+  });
+
+  it("una entrada del zip que el mapa nombra pero no existe se salta", () => {
+    const r = parse(
+      withMedia(
+        {
+          notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]],
+        },
+        { map: new TextEncoder().encode('{"0":"cat.jpg","7":"hole.png"}'), files: { "0": CAT } },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    // `hole.png` está referenciado por nadie y su fichero ni existe: doble
+    // motivo para no estar.
+    expect(Object.keys(r.media)).toEqual(["cat.jpg"]);
+  });
+
+  it("v3: una entrada sin nombre no desplaza los índices siguientes", () => {
+    // El índice del zip es la POSICIÓN en el vector. Con el contador de
+    // insertados (`out.size`), la tercera entrada se registraba como "1" y
+    // resolvía a los bytes de OTRA imagen: palabra con imagen equivocada sin
+    // ningún aviso. Anki nunca emite entradas sin nombre, pero un exportador
+    // de terceros sí puede.
+    const proto = hexToBytes("0a22" + CAT_ENTRY + "0a02" + "1005" + "0a2b" + DOG_ENTRY);
+    const r = parse(
+      withMedia(
+        {
+          notes: [[1, ['<img src="dog and bone.png">', "perro", "The dog barks."].join("\x1f"), 2]],
+          v3: true,
+        },
+        // "0" y "2" existen; no hay "1", como no hay nombre para él.
+        { map: zstdRaw(proto), files: { "0": CAT, "2": DOG } },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.media["dog and bone.png"]).toEqual(DOG);
+    // `cat.jpg` sí resuelve por índice 0, pero ninguna nota lo referencia y
+    // ya no viaja: el contrato nuevo es "solo lo referenciado".
+    expect(r.media["cat.jpg"]).toBeUndefined();
+  });
+
+  it("un mapa media corrupto deja el mazo entero importable", () => {
+    const r = parse(
+      withMedia({ notes: SAMPLE }, { map: new TextEncoder().encode("esto no es json"), files: {} }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes).toHaveLength(3);
+    expect(r.media).toEqual({});
+  });
+
+  it("v3: una entrada que declara más de 1 MB no se descomprime", () => {
+    // Atajo FCS: 4 bytes de payload declarando 2 MiB. Sin la guarda, fzstd
+    // devuelve un buffer de 2 MiB (asigna por lo declarado); con ella, la
+    // entrada se salta y la palabra entra igual, sin imagen.
+    const r = parse(
+      withMedia(
+        {
+          notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]],
+          v3: true,
+        },
+        {
+          map: zstdRaw(hexToBytes("0a22" + CAT_ENTRY)),
+          files: { "0": zstdRaw(new Uint8Array([1, 2, 3, 4]), 2 * 1024 * 1024) },
+        },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes).toHaveLength(1);
+    expect(r.media["cat.jpg"]).toBeUndefined();
+  });
+
+  it("un mapa media v3 truncado a medias se lee hasta donde llega", () => {
+    const r = parse(
+      withMedia(
+        {
+          notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]],
+          v3: true,
+        },
+        // Se corta justo después del tag de la segunda entrada (byte 36),
+        // dejando su longitud a medias: la primera entra, la segunda se
+        // pierde. Cortar la cola de un VALOR no bastaría —los campos
+        // len-delimited se autodelimitan y el nombre ya se habría leído—,
+        // así que el corte va en el prefijo. Un mapa a medias no puede
+        // tumbar la importación.
+        { map: zstdRaw(PROTO.subarray(0, 37)), files: { "0": CAT, "1": DOG } },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes).toHaveLength(1);
+    expect(Object.keys(r.media)).toEqual(["cat.jpg"]);
+  });
+
   it("deck vacío → notes vacío, no error", () => {
     expect(parse(buildApkg({ notes: [] })).notes).toEqual([]);
+  });
+
+  // El bug. `DB_FILES` buscaba `collection.anki2` primero, y en un .apkg moderno
+  // ese nombre es el DUMMY que escribe el exportador: el mazo entero se
+  // importaba como una nota que dice "This file requires a newer version of
+  // Anki.". Un .apkg real habría delatado el orden; el fixture no lo tenía.
+  it("layout v3: lee anki21b, no el collection.anki2 dummy", () => {
+    const r = parse(buildApkg({ notes: SAMPLE, v3: true }));
+    expect(r.notes).toHaveLength(3);
+    expect(r.notes.map((n) => n.fields[0])).toEqual(["run", "study", "startle"]);
+    expect(r.notes.some((n) => n.fields.some((f) => f.includes("newer version")))).toBe(false);
+  });
+
+  it("layout v3 sin anki21b legible: el dummy no enmascara el error", () => {
+    // Sin la real, importa el dummy y no finge que el mazo está vacío.
+    const r = parse(buildApkg({ notes: SAMPLE, v3: true }));
+    expect(r.ok).toBe(true);
+    // Legacy sin ninguna base: el mensaje sigue nombrando lo que falta.
+    expect(() => parse(zipSync({ media: new TextEncoder().encode("{}") }))).toThrow(
+      /collection\.anki2/,
+    );
+  });
+
+  it("meta sin anki21b: cae a collection.anki2 en vez de TypeError", () => {
+    // Zip mixto de un exportador de terceros o corrupto a medias: trae `meta`
+    // pero no la base v3. Antes del arreglo, `files[dbKey]!` era `undefined` e
+    // `isZstd(undefined)` reventaba con `TypeError` — un mensaje que miente
+    // sobre la causa y que el worker encima envolvía en `{ok:false}`. Ahora
+    // cae al buscador general: aquí encuentra el dummy y lo importa como tal,
+    // que es mejor que un críptico.
+    const files = unzipSync(buildApkg({ notes: SAMPLE, v3: true }));
+    delete files["collection.anki21b"];
+    const r = parse(zipSync(files));
+    expect(r.ok).toBe(true);
+    expect(r.notes).toHaveLength(1);
+    expect(r.notes[0]!.fields.some((f) => f.includes("newer version"))).toBe(true);
   });
 });
 

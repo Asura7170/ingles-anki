@@ -4,6 +4,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { db, type Node } from "../db";
 import { useApp } from "../store";
 import { deleteWords, runDelete } from "../purge";
+import CardImage from "./CardImage";
 import { scheduleAutoSave } from "../backup";
 import { retrievability } from "../srs";
 
@@ -368,6 +369,8 @@ export function NodeDialog({
           cerrar
         </button>
       </div>
+
+      <CardImage nodeId={node.id!} />
 
       <p className="muted small" style={{ marginTop: 12 }}>
         {node.card

@@ -324,6 +324,19 @@ input[type="range"] {
   letter-spacing: -0.02em;
 }
 
+/* La imagen de la card, si la palabra trae del .apkg. Centrada, contenida y
+   sin deformar: `object-fit` para que un PNG panorámico no empuje el cloze
+   fuera de la pantalla. `max-height` en vez de altura fija para no estirar
+   una miniatura pequeña. */
+.card-image {
+  display: block;
+  max-width: min(100%, 420px);
+  max-height: 240px;
+  object-fit: contain;
+  margin: 0 auto 18px;
+  border-radius: var(--r);
+}
+
 .audio {
   display: flex;
   gap: 8px;

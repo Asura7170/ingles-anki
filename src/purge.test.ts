@@ -80,6 +80,12 @@ describe("deleteWords", () => {
       .equals(node.id!)
       .modify({ translations: ["correr"] });
     await db.examples.add({ nodeId: node.id!, text: "They run.", sourceId: null });
+    await db.media.add({
+      nodeId: node.id!,
+      name: "run.jpg",
+      mime: "image/jpeg",
+      bytes: new Uint8Array([1, 2, 3]),
+    });
     await db.exposure.add({ nodeId: node.id!, ts: NOW, occurrences: 3 });
     await db.reviewLog.add({ nodeId: node.id!, ts: NOW, ease: 3, source: "button" });
     await db.relations.add({ fromNodeId: node.id!, toWord: "runner", type: "collocation" });
@@ -90,6 +96,9 @@ describe("deleteWords", () => {
     expect(await db.senses.count()).toBe(0);
     expect(await db.sources.count()).toBe(0);
     expect(await db.examples.count()).toBe(0);
+    // La imagen cuelga del nodo, no del source: si el nodo desaparece, nada la
+    // reclama y quedarse sería basura permanente sin origen que la regenere.
+    expect(await db.media.count()).toBe(0);
     expect(await db.exposure.count()).toBe(0);
     // La bitácora se va con la palabra: si el nodo desaparece, sus entradas no
     // describirían a nadie y sólo crecerían el backup.
@@ -353,6 +362,13 @@ describe("deleteDeck — la regla de huérfanos", () => {
     const a = await seedDeck("A", ["run"]);
     await seedDeck("B", ["run"]);
     expect(await db.nodes.count()).toBe(1);
+    const node = (await db.nodes.where("lemma").equals("run").first())!;
+    await db.media.add({
+      nodeId: node.id!,
+      name: "run.jpg",
+      mime: "image/jpeg",
+      bytes: new Uint8Array([1]),
+    });
 
     const r = await deleteDeck(a);
 
@@ -362,6 +378,9 @@ describe("deleteDeck — la regla de huérfanos", () => {
     expect(r.kept).toBe(0);
     expect(await db.nodes.count()).toBe(1);
     expect(await db.sources.count()).toBe(1);
+    // La imagen es de la palabra, no del mazo: la palabra vive y la imagen con
+    // ella. Sin este assert, un `media` colgado de `sources` pasaría la suite.
+    expect(await db.media.count()).toBe(1);
   });
 
   it("comparte entre generado e importado: sobrevive", async () => {
@@ -380,6 +399,12 @@ describe("deleteDeck — la regla de huérfanos", () => {
     const deck = await seedDeck("A", ["run", "study"]);
     const run = (await db.nodes.where("lemma").equals("run").first())!;
     await db.nodes.update(run.id!, { known: 1 });
+    await db.media.add({
+      nodeId: run.id!,
+      name: "run.jpg",
+      mime: "image/jpeg",
+      bytes: new Uint8Array([1]),
+    });
 
     const r = await deleteDeck(deck);
 
@@ -389,6 +414,9 @@ describe("deleteDeck — la regla de huérfanos", () => {
     const left = (await db.nodes.toArray())[0]!;
     expect(left.lemma).toBe("run");
     expect(left.known).toBe(1);
+    // `known` protege todo lo suyo: la palabra queda "sin mazo" y su imagen
+    // sigue con ella. Colgar `media` de `sources` la perdería aquí.
+    expect(await db.media.count()).toBe(1);
   });
 
   it("lo único que sobrevive son las marcadas, aunque tengan historial", async () => {

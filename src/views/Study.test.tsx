@@ -62,6 +62,7 @@ beforeEach(async () => {
   await db.open();
   await db.nodes.clear();
   await db.senses.clear();
+  await db.media.clear();
   await db.decks.clear();
   await db.exposure.clear();
 });
@@ -91,6 +92,39 @@ describe("con frase: cloze en lugar de palabra suelta", () => {
     await mount([makeItem({ sentence: undefined })]);
     expect(screen.getByText(/Sin frase disponible/)).toBeTruthy();
     expect(screen.getByText("startle")).toBeTruthy();
+  });
+
+  it("con imagen, pinta el <img> con su object URL", async () => {
+    // Se afirma el `src`, no que la imagen cargue: happy-dom no resuelve
+    // `blob:` (`enableImageFileLoading: false`), así que `load` nunca llega.
+    await db.media.add({
+      nodeId: 1,
+      name: "startle.jpg",
+      mime: "image/jpeg",
+      bytes: new Uint8Array([0xff, 0xd8, 0xff]),
+    });
+    await mount([makeItem({ sentence: undefined })]);
+    await waitFor(() => expect(document.querySelector("img.card-image")).toBeTruthy());
+    const img = document.querySelector("img.card-image") as HTMLImageElement;
+    expect(img.getAttribute("src")).toMatch(/^blob:/);
+  });
+
+  it("con dos imágenes, pinta las dos: ninguna fila es inalcanzable", async () => {
+    // El import guarda una fila por nombre y el esquema lo permite (`++id`,
+    // `nodeId` no único). Pintar solo `.first()` dejaba las demás guardadas
+    // pero invisibles.
+    await db.media.bulkAdd([
+      { nodeId: 1, name: "startle.jpg", mime: "image/jpeg", bytes: new Uint8Array([1]) },
+      { nodeId: 1, name: "startle-2.png", mime: "image/png", bytes: new Uint8Array([2]) },
+    ]);
+    await mount([makeItem({ sentence: undefined })]);
+    await waitFor(() => expect(document.querySelectorAll("img.card-image")).toHaveLength(2));
+    const srcs = [...document.querySelectorAll("img.card-image")].map((img) =>
+      img.getAttribute("src"),
+    );
+    expect(srcs.every((s) => s?.startsWith("blob:"))).toBe(true);
+    // Y son dos URLs distintas, no la misma dos veces.
+    expect(new Set(srcs).size).toBe(2);
   });
 
   it("los dos botones de audio están siempre", async () => {

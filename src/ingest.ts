@@ -17,6 +17,8 @@ export interface IngestItem {
   examples?: { text: string; translation?: string; fromAi?: boolean }[];
   occurrences?: number;
   senseTranslations?: string[];
+  /** Imágenes ya resueltas (bytes en mano), listas para volcar. */
+  images?: { name: string; mime: string; bytes: Uint8Array }[];
 }
 
 export interface IngestSource {
@@ -51,6 +53,10 @@ const contentHash = (item: IngestItem) =>
       ...(item.translations ?? []),
       ...(item.examples ?? []).map((e) => e.text),
       ...(item.senseTranslations ?? []),
+      // Los nombres, no los bytes: el hash decide si el contenido cambió, y
+      // una imagen nueva o quitada es cambio de contenido. Hasear MBs por
+      // cada nota para decidirlo sería pagar el coste en el camino caliente.
+      ...(item.images ?? []).map((m) => m.name),
     ].join("\0"),
   );
 
@@ -67,6 +73,21 @@ async function attachExamples(nodeId: number, examples: IngestItem["examples"], 
     rows.push({ nodeId, text, translation: e.translation, sourceId: e.fromAi ? null : sourceId });
   }
   if (rows.length) await db.examples.bulkAdd(rows);
+}
+
+/**
+ * Vuelca las imágenes resueltas por el importador. Fusión por unión con
+ * identidad (nodeId, name): el mismo nombre desde dos mazos es UNA fila y el
+ * primero gana. Sin hasear bytes no se distingue "mismo fichero" de
+ * "colisión de nombre", y hasear MBs en el camino caliente no compensa.
+ */
+async function attachImages(nodeId: number, images: IngestItem["images"]) {
+  if (!images?.length) return;
+  const existing = new Set(
+    (await db.media.where("nodeId").equals(nodeId).toArray()).map((m) => m.name),
+  );
+  const rows = images.filter((m) => !existing.has(m.name));
+  if (rows.length) await db.media.bulkAdd(rows.map((m) => ({ nodeId, ...m })));
 }
 
 async function attachTranslations(nodeId: number, item: IngestItem, sourceKind: SourceKind) {
@@ -129,7 +150,7 @@ export async function ingest(items: IngestItem[], source: IngestSource): Promise
   const now = Date.now();
   const result: IngestResult = { created: 0, merged: 0, changed: 0 };
 
-  await db.transaction("rw", db.nodes, db.senses, db.sources, db.examples, async () => {
+  await db.transaction("rw", db.nodes, db.senses, db.sources, db.examples, db.media, async () => {
     for (const item of items) {
       const version = contentHash(item);
       const existing = await db.nodes.where("lemma").equals(item.lemma).first();
@@ -199,10 +220,12 @@ export async function ingest(items: IngestItem[], source: IngestSource): Promise
           // El re-import trae frases nuevas: hay que adjuntarlas igual, o el
           // mazo mejorado se perdería justo lo que lo hace mejor.
           await attachExamples(node.id!, item.examples, prior.id!);
+          await attachImages(node.id!, item.images);
         }
       } else {
         const sourceId = (await db.sources.add(sourceRow))!;
         await attachExamples(node.id!, item.examples, sourceId);
+        await attachImages(node.id!, item.images);
       }
 
       await attachTranslations(node.id!, item, source.kind);

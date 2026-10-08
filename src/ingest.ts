@@ -1,5 +1,5 @@
 import { db, type Example, type Node, type Source, type SourceKind } from "./db";
-import { freqRank, isNGSL, loadFrequency } from "./identity";
+import { freqRank, isNGSL, isNoiseTranslation, loadFrequency } from "./identity";
 import { newCard } from "./srs";
 
 /**
@@ -101,9 +101,25 @@ async function attachTranslations(nodeId: number, item: IngestItem, sourceKind: 
 
   // Fusión por union: nunca sobrescribe. La IA añade alternativa marcada.
   const set = new Set(sense.translations);
-  const before = set.size;
-  for (const t of incoming) set.add(t);
-  if (set.size === before) return;
+  let changed = false;
+  for (const t of incoming) {
+    if (!set.has(t)) {
+      set.add(t);
+      changed = true;
+    }
+  }
+  // En re-import apkg, podar el ruido viejo (POS/pronunciación/formas): la
+  // unión nunca borra y si no el reverso seguiría mostrando krái/verb de
+  // importaciones anteriores. Solo esas clases caen; lo legítimo (incluido
+  // lo que puso el LLM) se conserva intacto.
+  if (sourceKind === "apkg") {
+    const node = await db.nodes.get(nodeId);
+    const headword = node?.headword ?? "";
+    for (const t of [...set]) {
+      if (isNoiseTranslation(t, headword) && set.delete(t)) changed = true;
+    }
+  }
+  if (!changed) return;
 
   await db.senses.update(sense.id!, {
     translations: [...set],

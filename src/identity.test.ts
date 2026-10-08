@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { identify, isFiller, STOPWORDS, FILLERS } from "./identity";
+import { identify, isFiller, isNoiseTranslation, STOPWORDS, FILLERS } from "./identity";
 
 /**
  * El motor de identidad. Si un lemma sale mal, el filtro de transcripciones se
@@ -164,5 +164,38 @@ describe("tamaño de las listas", () => {
       expect(FILLERS.has(f)).toBe(false);
       expect(identify(f)).toBeNull();
     }
+  });
+});
+
+describe("isNoiseTranslation — ruido de diccionario, no traducción", () => {
+  it("etiquetas POS caen (con punto opcional, sin importar caso)", () => {
+    for (const t of ["verb", "noun", "adjective", "Verb", "N.", "adj."]) {
+      expect(isNoiseTranslation(t, "cry")).toBe(true);
+    }
+  });
+
+  it("formas de la palabra caen", () => {
+    expect(isNoiseTranslation("cries", "cry")).toBe(true);
+    expect(isNoiseTranslation("parents", "parent")).toBe(true);
+  });
+
+  it("pronunciaciones caen: mismo esqueleto + no-ASCII", () => {
+    expect(isNoiseTranslation("krái", "cry")).toBe(true);
+    expect(isNoiseTranslation("hǽv", "have")).toBe(true);
+    expect(isNoiseTranslation("θíŋk", "think")).toBe(true);
+    expect(isNoiseTranslation("wɑ́tʃ", "watch")).toBe(true);
+  });
+
+  it("traducciones reales se quedan", () => {
+    expect(isNoiseTranslation("correr", "run")).toBe(false);
+    expect(isNoiseTranslation("to show sadness", "cry")).toBe(false);
+    expect(isNoiseTranslation("teléfono", "phone")).toBe(false);
+  });
+
+  it("tradeoff documentado: cognado acentuado cae y lo recupera el LLM", () => {
+    // "música" comparte esqueleto con "music" y trae acento: indistinguible
+    // de una pronunciación sin un modelo fonético. Cae aquí y vuelve por
+    // `fillMissingTranslations`, que rellena lo que falta.
+    expect(isNoiseTranslation("música", "music")).toBe(true);
   });
 });

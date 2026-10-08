@@ -1,5 +1,6 @@
 import type { Ease } from "./db";
 import { compareAnswer, type Comparison } from "./diff";
+import { identify } from "./identity";
 
 /**
  * Anki NO califica la respuesta escrita: el manual lo dice ("does not change how
@@ -25,6 +26,14 @@ export function gradeTyping(
   threshold = DEFAULT_THRESHOLD,
 ): GradeResult {
   if (!typed.trim()) return { comparison: compareAnswer(expected, ""), suggested: null };
+
+  // La forma flexiona al mismo lemma ("cries"→"cry"): acierto. Se compara
+  // consigo misma para un display todo verde honesto. Probamos vocabulario,
+  // no conjugación; cualquier otra entrada sigue el camino de siempre.
+  const expectedLemma = identify(expected)?.lemma;
+  if (expectedLemma && identify(typed)?.lemma === expectedLemma) {
+    return { comparison: compareAnswer(expected, expected), suggested: 4 };
+  }
 
   const comparison = compareAnswer(expected, typed);
   let suggested: Ease;

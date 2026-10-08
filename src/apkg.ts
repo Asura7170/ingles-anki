@@ -1,7 +1,7 @@
 import type { IngestResult } from "./ingest";
 import { ingest, type IngestItem } from "./ingest";
 import { db } from "./db";
-import { identify, type Identity } from "./identity";
+import { identify, fallbackIdentity, isNoiseTranslation } from "./identity";
 import { MAX_IMAGE_BYTES, mimeOf, rootOf, type ApkgNote, type ApkgOut } from "./apkg-format";
 
 let worker: Worker | null = null;
@@ -77,7 +77,9 @@ function mapFields(fields: string[]): {
   let start = 0;
   while (start < clean.length - 1 && isCode(clean[start]!)) start++;
   const headword = clean[start] ?? "";
-  const rest = clean.filter((_, i) => i !== start);
+  // Los códigos no son traducciones en ninguna posición: el ID va primero,
+  // pero si aparece en medio tampoco traduce nada.
+  const rest = clean.filter((_, i) => i !== start && !isCode(clean[i]!));
   const lemma = identify(headword)?.lemma;
 
   const longest = (pool: { f: string; i: number }[]): { f: string; i: number } | undefined => {
@@ -98,9 +100,14 @@ function mapFields(fields: string[]): {
   const example = pick?.f ?? "";
   const exampleIdx = pick?.i ?? -1;
 
+  // Ruido de diccionario fuera de traducciones (POS, formas, pronunciación).
+  // Si TODO es ruido no se quita nada: antes un chip raro que "Sin traducción".
+  const noisy = rest.map((f) => isNoiseTranslation(f, headword));
+  const dropAll = noisy.every(Boolean);
+
   return {
     headword,
-    translations: rest.filter((_, i) => i !== exampleIdx),
+    translations: rest.filter((_, i) => i !== exampleIdx && (dropAll || !noisy[i])),
     example: example || undefined,
   };
 }
@@ -139,19 +146,6 @@ export function resolveImages(
     images.push({ name, mime, bytes });
   }
   return { images, skipped };
-}
-
-/**
- * En un .apkg todo es vocabulario por decisión del usuario: los filtros de
- * transcripciones no pueden saltar notas (have/like/think/know/ill… son
- * palabras del mazo, no muletillas). Si `identify` dice null y queda texto
- * con ≥2 letras, entra como identidad literal. `skipped` queda para lo que
- * ni es texto.
- */
-function fallbackIdentity(raw: string): Identity | null {
-  const text = raw.trim().toLowerCase().replace(/\s+/g, " ");
-  if (text.replace(/[^\p{L}]/gu, "").length < 2) return null;
-  return { lemma: text, kind: text.includes(" ") ? "phrase" : "word" };
 }
 
 export async function importApkg(

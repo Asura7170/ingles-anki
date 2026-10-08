@@ -161,6 +161,7 @@ describe("importApkg sin worker", () => {
       "verb",
       "to show sadness",
       "He cries when he is sad.",
+      "cries",
     ].join("\x1f");
     dbh.run(`INSERT INTO notes (id, nid, mid, mod, usn, tags, flds) VALUES (1,1,1,0,0,'',?)`, [
       flds,
@@ -178,6 +179,11 @@ describe("importApkg sin worker", () => {
     expect(await db.nodes.where("lemma").equals("cry").first()).toBeTruthy();
     // El código no crea nodo: un solo lemma en la base.
     expect(await db.nodes.count()).toBe(1);
+    // Y el reverso trae la definición, no el ruido: ni POS, ni
+    // pronunciación, ni la forma flexionada otra vez.
+    const cry = (await db.nodes.where("lemma").equals("cry").first())!;
+    const sense = (await db.senses.where("nodeId").equals(cry.id!).first())!;
+    expect(sense.translations).toEqual(["to show sadness"]);
   });
 
   it("la definición larga no roba el ejemplo: gana donde aparece la palabra", async () => {
@@ -224,6 +230,29 @@ describe("importApkg sin worker", () => {
     for (const lemma of ["have", "like", "ill"]) {
       expect(await db.nodes.where("lemma").equals(lemma).first()).toBeTruthy();
     }
+  });
+
+  it("re-import poda el ruido viejo sin tocar lo legítimo", async () => {
+    // La unión nunca borra: sin poda, krái/verb de importaciones anteriores
+    // seguirían en el reverso aunque el mapeo ya no los genere.
+    const fields = (ex: string) =>
+      ["W_01", "watch", "wɑ́tʃ", "verb", "to look at something", ex, "watches"].join("\x1f");
+    const first = await importApkg(
+      asFile(buildNotesApkg("W", [fields("They watch a movie.")])),
+      direct,
+    );
+    expect(first.result.created).toBe(1);
+    const node = (await db.nodes.where("lemma").equals("watch").first())!;
+    const sense = (await db.senses.where("nodeId").equals(node.id!).first())!;
+    // Ruido de una importación vieja + traducción legítima (del LLM o a mano).
+    await db.senses.update(sense.id!, { translations: ["wɑ́tʃ", "verb", "mirar"] });
+    const second = await importApkg(
+      asFile(buildNotesApkg("W", [fields("They watch a movie every night.")])),
+      direct,
+    );
+    expect(second.result.changed).toBe(1);
+    const after = (await db.senses.where("nodeId").equals(node.id!).first())!;
+    expect(after.translations).toEqual(["mirar", "to look at something"]);
   });
 });
 

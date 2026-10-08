@@ -12,6 +12,24 @@ describe("gradeTyping", () => {
     expect(gradeTyping("run", "run").suggested).toBe(4);
   });
 
+  it("flexión válida → acierto: probamos vocabulario, no conjugación", () => {
+    // "He cries when he is sad" pide "cries", pero la respuesta es "cry".
+    // Sin lematizar lo tipado, la forma correcta del contexto salía mal.
+    const r = gradeTyping("cry", "cries");
+    expect(r.comparison.exact).toBe(true);
+    expect(r.suggested).toBe(4);
+  });
+
+  it("la flexión admite mayúsculas y espacios", () => {
+    expect(gradeTyping("cry", "Cries").suggested).toBe(4);
+    expect(gradeTyping("cry", "  cries  ").suggested).toBe(4);
+  });
+
+  it("otra palabra sigue saliendo mal", () => {
+    expect(gradeTyping("cry", "dog").suggested).toBe(1);
+    expect(gradeTyping("cry", "cry cry").suggested).toBe(1);
+  });
+
   it("un error en palabra larga → Difícil, no Otra vez", () => {
     // `sturtle` vs `startle`: ok=6, bad=1, missing=1 → 6/7 = 0.857 ≥ 0.8.
     // Un error de dedo no debe mandarte al intervalo de 10 minutos.

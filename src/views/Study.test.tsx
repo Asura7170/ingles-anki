@@ -109,6 +109,24 @@ describe("con frase: cloze en lugar de palabra suelta", () => {
     expect(img.getAttribute("src")).toMatch(/^blob:/);
   });
 
+  it("con dos imágenes, pinta las dos: ninguna fila es inalcanzable", async () => {
+    // El import guarda una fila por nombre y el esquema lo permite (`++id`,
+    // `nodeId` no único). Pintar solo `.first()` dejaba las demás guardadas
+    // pero invisibles.
+    await db.media.bulkAdd([
+      { nodeId: 1, name: "startle.jpg", mime: "image/jpeg", bytes: new Uint8Array([1]) },
+      { nodeId: 1, name: "startle-2.png", mime: "image/png", bytes: new Uint8Array([2]) },
+    ]);
+    await mount([makeItem({ sentence: undefined })]);
+    await waitFor(() => expect(document.querySelectorAll("img.card-image")).toHaveLength(2));
+    const srcs = [...document.querySelectorAll("img.card-image")].map((img) =>
+      img.getAttribute("src"),
+    );
+    expect(srcs.every((s) => s?.startsWith("blob:"))).toBe(true);
+    // Y son dos URLs distintas, no la misma dos veces.
+    expect(new Set(srcs).size).toBe(2);
+  });
+
   it("los dos botones de audio están siempre", async () => {
     await mount([makeItem()]);
     expect(screen.getByRole("button", { name: /Escuchar la frase/ })).toBeTruthy();

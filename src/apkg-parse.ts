@@ -92,16 +92,16 @@ function safeJson<T>(raw: string): T {
 /**
  * Lee el mapa `media` del zip: índice-en-texto → nombre original.
  *
- * Dos formatos, y la discriminadora es `meta`:
+ * Dos formatos, y la discriminadora es el CONTENIDO, no `meta`:
  *
  * - Legacy: JSON plano `{"0":"cat.jpg"}`.
  * - v3 (Anki 23.10+): zstd + protobuf `MediaEntries`. Cada entrada es un frame
  *   zstd independiente, como la colección, así que se descomprime con el mismo
  *   `isZstd`. El **orden del vector es el índice**; no hay un campo índice.
  *
- * En v1 del proto cada `MediaEntry` es `{ name=1, size=2, sha1=3 }`. Sólo hace
- * falta `name`. Si `meta` no está pero `media` sí, se asume legacy: es el mismo
- * criterio que usa Anki (`zstd_compressed() = !is_legacy()`).
+ * Hay zips v3 (con `meta`) cuyo mapa sigue siendo JSON plano: usar `meta`
+ * como discriminadora mandaba ese JSON al parser protobuf, que devolvía mapa
+ * vacío y TODAS las imágenes se perdían en silencio. Es el criterio de Anki.
  */
 function readMediaMap(files: Record<string, Uint8Array>): Map<string, string> {
   const raw = files.media;
@@ -109,19 +109,14 @@ function readMediaMap(files: Record<string, Uint8Array>): Map<string, string> {
   // ("older AnkiDroid versions wrote colpkg files without a media map").
   if (!raw) return new Map();
 
-  let bytes = raw;
-  if (isZstd(bytes)) {
+  if (isZstd(raw)) {
     try {
-      bytes = zstdDecompress(bytes) as Uint8Array<ArrayBuffer>;
+      return readProtoMediaMap(zstdDecompress(raw) as Uint8Array<ArrayBuffer>);
     } catch {
       return new Map(); // mejor sin imagen que sin mazo
     }
   }
-
-  const v3 = "meta" in files;
-  return v3
-    ? readProtoMediaMap(bytes)
-    : new Map(Object.entries(safeJson<Record<string, string>>(new TextDecoder().decode(bytes))));
+  return new Map(Object.entries(safeJson<Record<string, string>>(new TextDecoder().decode(raw))));
 }
 
 /**

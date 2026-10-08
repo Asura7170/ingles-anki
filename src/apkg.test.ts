@@ -80,6 +80,34 @@ const asFile = (zip: Uint8Array) =>
 /** Lo que el worker hace: parsear fuera del hilo principal. */
 const direct = (buffer: ArrayBuffer) => Promise.resolve(parseApkgBytes(buffer, SQL));
 
+/** .apkg mínimo con las notas dadas (campos ya unidos por \x1f), sin media. */
+function buildNotesApkg(deck: string, fldsList: string[]): Uint8Array {
+  const dbh = new SQL.Database();
+  dbh.run(`CREATE TABLE col (id INTEGER PRIMARY KEY, models TEXT, decks TEXT)`);
+  dbh.run(
+    `CREATE TABLE notes (id INTEGER PRIMARY KEY, nid INTEGER, mid INTEGER, mod INTEGER, usn INTEGER, tags TEXT, flds TEXT, sfld INTEGER, csum INTEGER, flags INTEGER, data TEXT)`,
+  );
+  dbh.run(
+    `CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER, ord INTEGER, mod INTEGER, type INTEGER, queue INTEGER, due INTEGER, ivl INTEGER, factor INTEGER, reps INTEGER, lapses INTEGER, left INTEGER, odue INTEGER, odid INTEGER, flags INTEGER, data TEXT)`,
+  );
+  dbh.run(`INSERT INTO col VALUES (1, '{}', ?)`, [JSON.stringify({ 2: { name: deck } })]);
+  fldsList.forEach((flds, i) => {
+    const nid = i + 1;
+    dbh.run(`INSERT INTO notes (id, nid, mid, mod, usn, tags, flds) VALUES (?,?,1,0,0,'',?)`, [
+      nid,
+      nid,
+      flds,
+    ]);
+    dbh.run(`INSERT INTO cards (id, nid, did, ord) VALUES (?,?,2,0)`, [nid, nid]);
+  });
+  const zip = zipSync({
+    "collection.anki2": new Uint8Array(dbh.export()),
+    media: new TextEncoder().encode("{}"),
+  });
+  dbh.close();
+  return zip;
+}
+
 beforeEach(async () => {
   globalThis.indexedDB = new IDBFactory();
   await db.delete();
@@ -150,6 +178,52 @@ describe("importApkg sin worker", () => {
     expect(await db.nodes.where("lemma").equals("cry").first()).toBeTruthy();
     // El código no crea nodo: un solo lemma en la base.
     expect(await db.nodes.count()).toBe(1);
+  });
+
+  it("la definición larga no roba el ejemplo: gana donde aparece la palabra", async () => {
+    // "to make a car move" (5 palabras) es más larga que "He drives to work."
+    // (4). Con "más largo" de ejemplo, la card caía a rama word-only aunque la
+    // frase estaba en el mazo.
+    const r = await importApkg(
+      asFile(
+        buildNotesApkg("1000 Basic English Words", [
+          [
+            "DRV_01",
+            "drive",
+            "dráiv",
+            "verb",
+            "to make a car move",
+            "He drives to work.",
+            "drives",
+          ].join("\x1f"),
+        ]),
+      ),
+      direct,
+    );
+    expect(r.result.created).toBe(1);
+    const drive = (await db.nodes.where("lemma").equals("drive").first())!;
+    const ex = await db.examples.where("nodeId").equals(drive.id!).toArray();
+    expect(ex.map((e) => e.text)).toEqual(["He drives to work."]);
+  });
+
+  it("stopwords y muletillas entran igual: en un .apkg todo es vocabulario", async () => {
+    // have/like/think/know/ill los mataban FILLERS/STOPWORDS (pensados para
+    // transcripciones) y la nota se saltaba entera.
+    const r = await importApkg(
+      asFile(
+        buildNotesApkg("1000 Basic English Words", [
+          ["have", "hǽv", "verb", "to own", "They have a car.", "have"].join("\x1f"),
+          ["like", "láik", "verb", "to enjoy", "She likes tea.", "likes"].join("\x1f"),
+          ["ill", "íl", "adjective", "not well", "He is ill.", "ill"].join("\x1f"),
+        ]),
+      ),
+      direct,
+    );
+    expect(r.result.created).toBe(3);
+    expect(r.skipped).toBe(0);
+    for (const lemma of ["have", "like", "ill"]) {
+      expect(await db.nodes.where("lemma").equals(lemma).first()).toBeTruthy();
+    }
   });
 });
 

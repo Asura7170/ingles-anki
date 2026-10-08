@@ -1,7 +1,7 @@
 import type { IngestResult } from "./ingest";
 import { ingest, type IngestItem } from "./ingest";
 import { db } from "./db";
-import { identify } from "./identity";
+import { identify, type Identity } from "./identity";
 import { MAX_IMAGE_BYTES, mimeOf, rootOf, type ApkgNote, type ApkgOut } from "./apkg-format";
 
 let worker: Worker | null = null;
@@ -46,10 +46,25 @@ const isCode = (f: string) =>
   /\d/.test(f) && !/[a-z]/.test(f) && (f.includes("_") || /^[\d]/.test(f));
 
 /**
+ * ¿Menciona el campo a la palabra (en cualquier flexión)? Es el mismo
+ * `identify` que usa `blankSentence` para dibujar el hueco: si dice que sí,
+ * el hueco existe por construcción.
+ */
+function mentionsHeadword(field: string, lemma: string | undefined): boolean {
+  if (!lemma) return false;
+  return field.split(/\s+/).some((tok) => identify(tok)?.lemma === lemma);
+}
+
+/**
  * Mapeo heurístico de campos. field[0] = palabra (o el primer campo que no
- * sea código); el campo más largo con >=5 palabras = ejemplo; el resto =
- * traducciones. Los .apkg no tienen contrato sobre qué campo es qué, así
- * que esto es mejor que nada y no peor.
+ * sea código); ejemplo = el campo donde APARECE la palabra, no el más largo;
+ * el resto = traducciones. Los .apkg no tienen contrato sobre qué campo es
+ * qué, así que esto es mejor que nada y no peor.
+ *
+ * El "más largo" elegía definiciones ("to make a car move" le ganaba a "He
+ * drives to work.") y la card caía a rama word-only: la frase existe en el
+ * mazo pero no se mostraba. El fallback conserva la regla vieja para mazos
+ * donde la palabra no aparece en ningún campo.
  */
 function mapFields(fields: string[]): {
   headword: string;
@@ -63,15 +78,25 @@ function mapFields(fields: string[]): {
   while (start < clean.length - 1 && isCode(clean[start]!)) start++;
   const headword = clean[start] ?? "";
   const rest = clean.filter((_, i) => i !== start);
+  const lemma = identify(headword)?.lemma;
 
-  let example = "";
-  let exampleIdx = -1;
-  rest.forEach((f, i) => {
-    if (f.split(/\s+/).length >= 5 && f.length > example.length) {
-      example = f;
-      exampleIdx = i;
+  const longest = (pool: { f: string; i: number }[]): { f: string; i: number } | undefined => {
+    let best: { f: string; i: number } | undefined;
+    for (const c of pool) {
+      if (!best || c.f.length > best.f.length) best = c;
     }
-  });
+    return best;
+  };
+
+  // Primero la frase (≥3 palabras: "They watch a movie." tiene 4); si ninguna
+  // la menciona, la regla vieja (más largo con ≥5).
+  const withWord = rest
+    .map((f, i) => ({ f, i }))
+    .filter(({ f }) => f.split(/\s+/).length >= 3 && mentionsHeadword(f, lemma));
+  const legacy = rest.map((f, i) => ({ f, i })).filter(({ f }) => f.split(/\s+/).length >= 5);
+  const pick = longest(withWord.length ? withWord : legacy);
+  const example = pick?.f ?? "";
+  const exampleIdx = pick?.i ?? -1;
 
   return {
     headword,
@@ -116,6 +141,19 @@ export function resolveImages(
   return { images, skipped };
 }
 
+/**
+ * En un .apkg todo es vocabulario por decisión del usuario: los filtros de
+ * transcripciones no pueden saltar notas (have/like/think/know/ill… son
+ * palabras del mazo, no muletillas). Si `identify` dice null y queda texto
+ * con ≥2 letras, entra como identidad literal. `skipped` queda para lo que
+ * ni es texto.
+ */
+function fallbackIdentity(raw: string): Identity | null {
+  const text = raw.trim().toLowerCase().replace(/\s+/g, " ");
+  if (text.replace(/[^\p{L}]/gu, "").length < 2) return null;
+  return { lemma: text, kind: text.includes(" ") ? "phrase" : "word" };
+}
+
 export async function importApkg(
   file: File,
   parse: (buffer: ArrayBuffer) => Promise<ApkgOut> = runWorker,
@@ -145,7 +183,7 @@ export async function importApkg(
   // lo que permite detectar cambios al reimportar.
   for (const note of raw.notes as ApkgNote[]) {
     const mapped = mapFields(note.fields);
-    const id = identify(mapped.headword);
+    const id = identify(mapped.headword) ?? fallbackIdentity(mapped.headword);
     if (!id) {
       skipped++;
       continue;

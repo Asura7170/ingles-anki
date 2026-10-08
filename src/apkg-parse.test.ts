@@ -309,6 +309,27 @@ describe("el .apkg se parsea", () => {
     expect(r.media["dog and bone.png"]).toEqual(DOG);
   });
 
+  it("v3 con mapa JSON (no protobuf): el contenido manda, no `meta`", () => {
+    // Layout real en circulación: trae `meta` pero el mapa es JSON plano.
+    // Antes `meta` elegía protobuf, el mapa salía vacío y TODAS las imágenes
+    // se perdían en silencio (`skippedImages` las contaba sin que nadie
+    // mirara por qué).
+    const r = parse(
+      withMedia(
+        {
+          notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]],
+          v3: true,
+        },
+        {
+          map: new TextEncoder().encode('{"0":"cat.jpg"}'),
+          files: { "0": CAT },
+        },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.media["cat.jpg"]).toEqual(CAT);
+  });
+
   it("recoge el <img> de todos los campos, no sólo del ejemplo", () => {
     // La imagen es de la palabra, no de la frase. Y si el texto de la frase
     // llevara el <img>, `blankSentence` trocearía por espacios y `identify`

@@ -18,6 +18,10 @@ describe("gradeTyping", () => {
     const r = gradeTyping("cry", "cries");
     expect(r.comparison.exact).toBe(true);
     expect(r.suggested).toBe(4);
+    // El reverso muestra lo tipado ("cries") en verde, no el lemma: pintar
+    // "cry" parecía que te cambiaba la respuesta.
+    expect(r.comparison.typedLine.map((t) => t.text).join("")).toBe("cries");
+    expect(r.comparison.typedLine.every((t) => t.kind === "good")).toBe(true);
   });
 
   it("la flexión admite mayúsculas y espacios", () => {

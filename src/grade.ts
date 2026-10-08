@@ -1,5 +1,5 @@
 import type { Ease } from "./db";
-import { compareAnswer, type Comparison } from "./diff";
+import { compareAnswer, normalizeForDiff, type Comparison } from "./diff";
 import { identify } from "./identity";
 
 /**
@@ -27,12 +27,25 @@ export function gradeTyping(
 ): GradeResult {
   if (!typed.trim()) return { comparison: compareAnswer(expected, ""), suggested: null };
 
-  // La forma flexiona al mismo lemma ("cries"→"cry"): acierto. Se compara
-  // consigo misma para un display todo verde honesto. Probamos vocabulario,
-  // no conjugación; cualquier otra entrada sigue el camino de siempre.
+  // La forma flexiona al mismo lemma ("cries"→"cry"): acierto. El display
+  // muestra LO TIPADO en verde, no el lemma: pintar "cry" cuando escribiste
+  // "cries" parecía que te cambiaba la respuesta. Probamos vocabulario, no
+  // conjugación; cualquier otra entrada sigue el camino de siempre.
   const expectedLemma = identify(expected)?.lemma;
   if (expectedLemma && identify(typed)?.lemma === expectedLemma) {
-    return { comparison: compareAnswer(expected, expected), suggested: 4 };
+    const normTyped = normalizeForDiff(typed);
+    return {
+      comparison: {
+        exact: true,
+        typedLine: [{ kind: "good", text: normTyped }],
+        expectedLine: [{ kind: "good", text: normalizeForDiff(expected) }],
+        ok: normTyped.length,
+        bad: 0,
+        missing: 0,
+        ratio: 1,
+      },
+      suggested: 4,
+    };
   }
 
   const comparison = compareAnswer(expected, typed);

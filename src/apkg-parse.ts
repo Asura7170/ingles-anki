@@ -11,13 +11,45 @@
 import { unzipSync } from "fflate";
 import { decompress as zstdDecompress } from "fzstd";
 import type { SqlJsStatic } from "sql.js";
-import { findImages, levelOf, stripHtml, type ApkgNote, type ApkgOut } from "./apkg-format";
+import {
+  findImages,
+  levelOf,
+  MAX_IMAGE_BYTES,
+  stripHtml,
+  type ApkgNote,
+  type ApkgOut,
+} from "./apkg-format";
 
 /** Los tres nombres que ha usado Anki para la base del mazo. */
 const DB_FILES = ["collection.anki2", "collection.anki21b", "collection.anki21"];
 
 /** Magic bytes de un frame zstd. */
 const isZstd = (b: Uint8Array) => b[0] === 0x28 && b[1] === 0xb5 && b[2] === 0x2f && b[3] === 0xfd;
+
+/**
+ * Tamaño declarado del contenido de un frame zstd, o `null` si el header no
+ * lo trae. Mismo layout que lee fzstd: descriptor, ventana opcional,
+ * diccionario opcional y campo FCS de tamaño variable.
+ *
+ * ponytail: atajo, no garantía. El FCS es opcional y puede mentir en ambos
+ * sentidos (declara poco y expande más); el corte duro exigiría decode en
+ * streaming con tope, que para esta app es YAGNI. Esto solo evita la
+ * asignación inequívoca: declarado enorme con bytes de sobra para saberlo.
+ */
+function zstdContentSize(b: Uint8Array): number | null {
+  if (b.length < 5) return null;
+  const flg = b[4]!;
+  const fcf = flg >> 6;
+  const ss = (flg >> 5) & 1;
+  const dict = flg & 3;
+  const fsb = fcf ? 1 << fcf : ss;
+  if (!fsb) return null;
+  const at = 6 - ss + (dict === 3 ? 4 : dict);
+  let n = 0;
+  // Multiplicación y no `<<`: un FCS de 8 bytes desborda los 32 bits.
+  for (let i = fsb - 1; i >= 0; i--) n = n * 256 + (b[at + i] ?? 0);
+  return n + (fcf === 1 ? 256 : 0);
+}
 
 /**
  * Nombres de mazo por id. Hay dos esquemas en circulación y no se puede asumir
@@ -275,14 +307,26 @@ export function parseApkgBytes(buffer: ArrayBuffer, SQL: SqlJsStatic): ApkgOut {
       });
     }
 
-    // Sólo las entradas que el mapa resuelve. Las entradas del zip se llaman
-    // por índice, nunca por nombre, y el índice puede tener huecos (el
-    // exportador legacy salta ficheros que no existen), así que se itera el
-    // mapa y no se asume `0..N-1`.
+    // Sólo lo que alguna nota referencia, y sólo las entradas que el mapa
+    // resuelve. El mapa nombra TODO el media del mazo (el audio incluido, que
+    // `findImages` ni mira): descomprimir y clonar lo que nadie resuelve es
+    // memoria regalada. Las entradas del zip se llaman por índice, nunca por
+    // nombre, y el índice puede tener huecos (el exportador legacy salta
+    // ficheros que no existen), así que se itera el mapa y no se asume
+    // `0..N-1`.
+    const referenced = new Set(notes.flatMap((n) => n.images));
     const media: Record<string, Uint8Array> = {};
     for (const [index, name] of mediaMap) {
+      if (!referenced.has(name)) continue;
       const entry = files[index];
       if (!entry) continue;
+      // Atajo FCS: si declara más de lo que guardamos, ni se descomprime. La
+      // palabra entra igual y `resolveImages` lo cuenta como saltada (llega
+      // sin bytes, igual que una rota).
+      if (isZstd(entry)) {
+        const declared = zstdContentSize(entry);
+        if (declared !== null && declared > MAX_IMAGE_BYTES) continue;
+      }
       try {
         media[name] = isZstd(entry) ? (zstdDecompress(entry) as Uint8Array<ArrayBuffer>) : entry;
       } catch {

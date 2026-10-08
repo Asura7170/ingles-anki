@@ -215,14 +215,18 @@ describe("el .apkg se parsea", () => {
    * Envoltura zstd mínima, hecha a mano porque `fzstd` sólo descomprime.
    * Magic + descriptor (single-segment, FCS de 4 bytes) + tamaño + un bloque
    * RAW con Last_Block=1. Es el mismo formato que emite el exportador de Anki.
+   *
+   * `declared` permite mentir en el FCS: por defecto dice la verdad (el tamaño
+   * real), pero un frame corrupto o malicioso puede declarar 2 MiB con 4 bytes
+   * de payload. fzstd asigna por lo declarado.
    */
-  const zstdRaw = (payload: Uint8Array): Uint8Array => {
+  const zstdRaw = (payload: Uint8Array, declared: number = payload.length): Uint8Array => {
     const n = payload.length;
     // magic(4) + descriptor(1) + FCS(4) + Block_Header(3).
     const header = new Uint8Array(12);
     header.set([0x28, 0xb5, 0x2f, 0xfd, 0xa0], 0);
-    new DataView(header.buffer).setUint32(5, n, true);
-    const bh = (n << 3) | 1; // Last_Block=1, tipo 0 (RAW), tamaño
+    new DataView(header.buffer).setUint32(5, declared, true);
+    const bh = (n << 3) | 1; // Last_Block=1, tipo 0 (RAW), tamaño REAL
     header[9] = bh & 0xff;
     header[10] = (bh >>> 8) & 0xff;
     header[11] = (bh >>> 16) & 0xff;
@@ -240,7 +244,12 @@ describe("el .apkg se parsea", () => {
   it("legacy: resuelve <img> a su entrada del zip por el mapa media", () => {
     const r = parse(
       withMedia(
-        { notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]] },
+        {
+          notes: [
+            [1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2],
+            [2, ['<img src="dog and bone.png">', "perro", "The dog barks."].join("\x1f"), 2],
+          ],
+        },
         {
           map: new TextEncoder().encode('{"0":"cat.jpg","1":"dog and bone.png"}'),
           files: { "0": CAT, "1": DOG },
@@ -249,6 +258,7 @@ describe("el .apkg se parsea", () => {
     );
     expect(r.ok).toBe(true);
     expect(r.notes[0]!.images).toEqual(["cat.jpg"]);
+    expect(r.notes[1]!.images).toEqual(["dog and bone.png"]);
     // El nombre del zip es el índice; `media` es quien traduce.
     expect(r.media["cat.jpg"]).toEqual(CAT);
     expect(r.media["dog and bone.png"]).toEqual(DOG);
@@ -256,11 +266,31 @@ describe("el .apkg se parsea", () => {
     expect(r.notes[0]!.fields[0]).toBe("");
   });
 
+  it("lo que ninguna nota referencia no viaja: ni se descomprime ni se clona", () => {
+    // El mapa nombra TODO el media del mazo (el audio incluido, que
+    // `findImages` ni mira). Antes todo se descomprimía y se mandaba al hilo
+    // principal; ahora solo lo referenciado.
+    const r = parse(
+      withMedia(
+        { notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]] },
+        {
+          map: new TextEncoder().encode('{"0":"cat.jpg","1":"dog and bone.png"}'),
+          files: { "0": CAT, "1": DOG },
+        },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(Object.keys(r.media)).toEqual(["cat.jpg"]);
+  });
+
   it("v3: el mapa media es zstd+protobuf, no JSON", () => {
     const r = parse(
       withMedia(
         {
-          notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]],
+          notes: [
+            [1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2],
+            [2, ['<img src="dog and bone.png">', "perro", "The dog barks."].join("\x1f"), 2],
+          ],
           v3: true,
         },
         { map: zstdRaw(PROTO), files: { "0": CAT, "1": DOG } },
@@ -316,11 +346,15 @@ describe("el .apkg se parsea", () => {
   it("una entrada del zip que el mapa nombra pero no existe se salta", () => {
     const r = parse(
       withMedia(
-        { notes: SAMPLE },
+        {
+          notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]],
+        },
         { map: new TextEncoder().encode('{"0":"cat.jpg","7":"hole.png"}'), files: { "0": CAT } },
       ),
     );
     expect(r.ok).toBe(true);
+    // `hole.png` está referenciado por nadie y su fichero ni existe: doble
+    // motivo para no estar.
     expect(Object.keys(r.media)).toEqual(["cat.jpg"]);
   });
 
@@ -343,8 +377,9 @@ describe("el .apkg se parsea", () => {
     );
     expect(r.ok).toBe(true);
     expect(r.media["dog and bone.png"]).toEqual(DOG);
-    // Y la primera sigue resolviendo a su propio fichero, no al desplazado.
-    expect(r.media["cat.jpg"]).toEqual(CAT);
+    // `cat.jpg` sí resuelve por índice 0, pero ninguna nota lo referencia y
+    // ya no viaja: el contrato nuevo es "solo lo referenciado".
+    expect(r.media["cat.jpg"]).toBeUndefined();
   });
 
   it("un mapa media corrupto deja el mazo entero importable", () => {
@@ -356,10 +391,34 @@ describe("el .apkg se parsea", () => {
     expect(r.media).toEqual({});
   });
 
+  it("v3: una entrada que declara más de 1 MB no se descomprime", () => {
+    // Atajo FCS: 4 bytes de payload declarando 2 MiB. Sin la guarda, fzstd
+    // devuelve un buffer de 2 MiB (asigna por lo declarado); con ella, la
+    // entrada se salta y la palabra entra igual, sin imagen.
+    const r = parse(
+      withMedia(
+        {
+          notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]],
+          v3: true,
+        },
+        {
+          map: zstdRaw(hexToBytes("0a22" + CAT_ENTRY)),
+          files: { "0": zstdRaw(new Uint8Array([1, 2, 3, 4]), 2 * 1024 * 1024) },
+        },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.notes).toHaveLength(1);
+    expect(r.media["cat.jpg"]).toBeUndefined();
+  });
+
   it("un mapa media v3 truncado a medias se lee hasta donde llega", () => {
     const r = parse(
       withMedia(
-        { notes: SAMPLE, v3: true },
+        {
+          notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]],
+          v3: true,
+        },
         // Se corta justo después del tag de la segunda entrada (byte 36),
         // dejando su longitud a medias: la primera entra, la segunda se
         // pierde. Cortar la cola de un VALOR no bastaría —los campos
@@ -370,7 +429,7 @@ describe("el .apkg se parsea", () => {
       ),
     );
     expect(r.ok).toBe(true);
-    expect(r.notes).toHaveLength(3);
+    expect(r.notes).toHaveLength(1);
     expect(Object.keys(r.media)).toEqual(["cat.jpg"]);
   });
 

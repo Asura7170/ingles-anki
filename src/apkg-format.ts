@@ -94,6 +94,22 @@ export function findImages(field: string): string[] {
   return out;
 }
 
+/**
+ * 1 MB por imagen. Sin tope, un .apkg con imágenes enormes revienta la cuota
+ * de IndexedDB a mitad de importación y deja el mazo a medias. Anki permite
+ * 100 MiB por fichero, pero una imagen de vocabulario a 1 MB ya se ve
+ * perfecta en la card: esto es calibración, no regla adivinada.
+ *
+ * Vive aquí y no en `apkg.ts` porque el parser también la necesita (atajo
+ * FCS) y `apkg-parse` no puede importar `apkg` (arrastraría Dexie al worker).
+ *
+ * ponytail: sin tope TOTAL — 200 imágenes × 1 MB caben en cuota pero el
+ * autosave serializa ~270 MB de base64 y puede colgar o reventar a mitad de
+ * `buildDump`. Si muerde, el techo global va aquí con corte (la palabra entra
+ * igual, sin ella), nunca con error.
+ */
+export const MAX_IMAGE_BYTES = 1 * 1024 * 1024;
+
 /** La jerarquía de sub-decks ES el nivel. "4000 EW::Book 1" → "Book 1". */
 export function levelOf(deckName: string | undefined): string {
   if (!deckName) return "sin nivel";

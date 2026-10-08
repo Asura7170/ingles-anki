@@ -2,7 +2,7 @@ import type { IngestResult } from "./ingest";
 import { ingest, type IngestItem } from "./ingest";
 import { db } from "./db";
 import { identify } from "./identity";
-import { mimeOf, rootOf, type ApkgNote, type ApkgOut } from "./apkg-format";
+import { MAX_IMAGE_BYTES, mimeOf, rootOf, type ApkgNote, type ApkgOut } from "./apkg-format";
 
 let worker: Worker | null = null;
 
@@ -75,19 +75,6 @@ export interface ApkgImport {
   /** Imágenes referenciadas que no se guardaron (rotas, enormes, sin mime). */
   skippedImages: number;
 }
-
-/**
- * 1 MB por imagen. Sin tope, un .apkg con imágenes enormes revienta la cuota
- * de IndexedDB a mitad de importación y deja el mazo a medias. Anki permite
- * 100 MiB por fichero, pero una imagen de vocabulario a 1 MB ya se ve
- * perfecta en la card: esto es calibración, no regla adivinada.
- *
- * ponytail: sin tope TOTAL — 200 imágenes × 1 MB caben en cuota pero el
- * autosave serializa ~270 MB de base64 y puede colgar o reventar a mitad de
- * `buildDump`. Si muerde, el techo global va aquí con corte (la palabra entra
- * igual, sin ella), nunca con error.
- */
-const MAX_IMAGE_BYTES = 1 * 1024 * 1024;
 
 /**
  * Resuelve los nombres de `note.images` a bytes listos para `ingest`.

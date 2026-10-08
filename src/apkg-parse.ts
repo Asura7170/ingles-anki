@@ -175,21 +175,28 @@ function protoEntryName(msg: Uint8Array): string {
 function readProtoMediaMap(bytes: Uint8Array): Map<string, string> {
   const out = new Map<string, string>();
   const c: ProtoCursor = { bytes, i: 0 };
+  // Posicional y no `out.size`: el índice del zip es la POSICIÓN en el vector,
+  // exista o no `name`. Con el contador de insertados, una sola entrada
+  // anómala desplazaba todo lo que sigue y cruzaba bytes entre imágenes.
+  let idx = 0;
   try {
     while (c.i < bytes.length) {
       const wire = protoVarint(c) & 7;
       if (wire !== 2) {
+        // Escalar de `MediaEntries`, no una entrada: no ocupa posición en el
+        // vector y no consume índice.
         if (!skipProtoField(c, wire)) break;
         continue;
       }
       const len = protoVarint(c);
       const name = protoEntryName(bytes.subarray(c.i, c.i + len));
       c.i += len;
-      if (name) out.set(String(out.size), name);
+      if (name) out.set(String(idx), name);
+      idx++;
     }
   } catch {
-    // Un mapa a medias es peor que ninguno: las notas importan igual y las
-    // imágenes que sí se resuelven se guardan.
+    // Mejor parcial que nada: las notas importan igual y las imágenes que sí
+    // se resuelven se guardan.
   }
   return out;
 }
@@ -212,9 +219,14 @@ function buildCardDeck(q: <T>(sql: string) => T[]): Map<number, number> {
  * desde Anki 23.10 el `.apkg` por defecto lleva `collection.anki21b` con los datos
  * y **además** un `collection.anki2` dummy con una nota de aviso. Como `find`
  * devuelve el primero que exista, el orden de `DB_FILES` solo elegía el dummy.
+ *
+ * Con las dos condiciones: un zip mixto (con `meta` pero sin `anki21b`, de un
+ * exportador de terceros o corrupto a medias) cae al buscador general en vez
+ * de reventar con `TypeError` en `files[dbKey]!`.
  */
 function findCollection(files: Record<string, Uint8Array>): string | undefined {
-  return "meta" in files ? "collection.anki21b" : DB_FILES.find((k) => k in files);
+  if ("meta" in files && "collection.anki21b" in files) return "collection.anki21b";
+  return DB_FILES.find((k) => k in files);
 }
 
 export function parseApkgBytes(buffer: ArrayBuffer, SQL: SqlJsStatic): ApkgOut {

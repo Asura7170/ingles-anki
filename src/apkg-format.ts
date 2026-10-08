@@ -35,15 +35,6 @@ export const stripHtml = (s: string): string =>
     .replace(/\s+/g, " ")
     .trim();
 
-/**
- * Deshace lo mínimo de HTML que Anki puede haber escapado en un `src`.
- *
- * Anki guarda el nombre **crudo** en el campo —con espacios, con `%`, con `&`—
- * y sólo percent-encodifica al mostrar, así que no hay nada que decodificar de
- * URL. Lo único que aparece escapado son entidades, y sólo cuando el nombre
- * original ya las traía. `&amp;` va después de las demás: si fuese primero,
- * `&amp;lt;` se decodificaría dos veces y saldría un `<` que nunca estuvo ahí.
- */
 const SRC_ENTITIES: Record<string, string> = {
   quot: '"',
   apos: "'",

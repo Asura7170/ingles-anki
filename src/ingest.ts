@@ -76,10 +76,10 @@ async function attachExamples(nodeId: number, examples: IngestItem["examples"], 
 }
 
 /**
- * Vuelca las imágenes resueltas por el importador. Fusión por unión, como todo
- * lo demás: la misma imagen desde dos mazos son dos filas y ninguna pisa a la
- * otra. El dedup es por nombre dentro del nodo, que es lo único barato de
- * comparar sin hasear bytes.
+ * Vuelca las imágenes resueltas por el importador. Fusión por unión con
+ * identidad (nodeId, name): el mismo nombre desde dos mazos es UNA fila y el
+ * primero gana. Sin hasear bytes no se distingue "mismo fichero" de
+ * "colisión de nombre", y hasear MBs en el camino caliente no compensa.
  */
 async function attachImages(nodeId: number, images: IngestItem["images"]) {
   if (!images?.length) return;

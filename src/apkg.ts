@@ -77,12 +77,17 @@ export interface ApkgImport {
 }
 
 /**
- * 5 MB por imagen. Sin tope, un .apkg con imágenes enormes revienta la cuota
+ * 1 MB por imagen. Sin tope, un .apkg con imágenes enormes revienta la cuota
  * de IndexedDB a mitad de importación y deja el mazo a medias. Anki permite
- * 100 MiB por fichero, pero un mazo de vocabulario no necesita ni la
- * vigésima parte: esto es calibración, no regla adivinada.
+ * 100 MiB por fichero, pero una imagen de vocabulario a 1 MB ya se ve
+ * perfecta en la card: esto es calibración, no regla adivinada.
+ *
+ * ponytail: sin tope TOTAL — 200 imágenes × 1 MB caben en cuota pero el
+ * autosave serializa ~270 MB de base64 y puede colgar o reventar a mitad de
+ * `buildDump`. Si muerde, el techo global va aquí con corte (la palabra entra
+ * igual, sin ella), nunca con error.
  */
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 1 * 1024 * 1024;
 
 /**
  * Resuelve los nombres de `note.images` a bytes listos para `ingest`.

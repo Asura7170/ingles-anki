@@ -89,8 +89,15 @@ function buildApkg(opts: {
 
   // Layout v3: la real es anki21b y el anki2 es un dummy con una sola nota que
   // dice "This file requires a newer version of Anki." — igual que hace
-  // `write_dummy_collection` en el exportador de Anki.
+  // `write_dummy_collection` en el exportador de Anki. Con esquema completo
+  // (col incluida): un dummy sin tablas no es una base válida y el fallback
+  // del lector reventaría en `readDeckNames` en vez de devolver la nota.
   const dummy = new SQL.Database();
+  dummy.run(`CREATE TABLE col (id INTEGER PRIMARY KEY, models TEXT, decks TEXT)`);
+  dummy.run(`INSERT INTO col VALUES (1, '{}', '{}')`);
+  dummy.run(
+    `CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER, ord INTEGER, mod INTEGER, type INTEGER, queue INTEGER, due INTEGER, ivl INTEGER, factor INTEGER, reps INTEGER, lapses INTEGER, left INTEGER, odue INTEGER, odid INTEGER, flags INTEGER, data TEXT)`,
+  );
   dummy.run(
     `CREATE TABLE notes (id INTEGER PRIMARY KEY, nid INTEGER, mid INTEGER, mod INTEGER, usn INTEGER, tags TEXT, flds TEXT, sfld INTEGER, csum INTEGER, flags INTEGER, data TEXT)`,
   );
@@ -199,20 +206,10 @@ describe("el .apkg se parsea", () => {
   // Sin ese envoltorio el parser lee el tag del `name` como si fuese el del
   // entry y el mapa sale vacío — que es exactamente lo que pasó al escribir
   // este fixture la primera vez.
-  const PROTO = hexToBytes(
-    "0a22" +
-      "0a07" +
-      "6361742e6a7067" +
-      "10e20a" +
-      "1a14" +
-      "01".repeat(20) +
-      "0a2b" +
-      "0a10" +
-      "646f6720616e6420626f6e652e706e67" +
-      "108010" +
-      "1a14" +
-      "02".repeat(20),
-  );
+  const CAT_ENTRY = "0a07" + "6361742e6a7067" + "10e20a" + "1a14" + "01".repeat(20); // 34 B
+  const DOG_ENTRY =
+    "0a10" + "646f6720616e6420626f6e652e706e67" + "108010" + "1a14" + "02".repeat(20); // 43 B
+  const PROTO = hexToBytes("0a22" + CAT_ENTRY + "0a2b" + DOG_ENTRY);
 
   /**
    * Envoltura zstd mínima, hecha a mano porque `fzstd` sólo descomprime.
@@ -327,6 +324,29 @@ describe("el .apkg se parsea", () => {
     expect(Object.keys(r.media)).toEqual(["cat.jpg"]);
   });
 
+  it("v3: una entrada sin nombre no desplaza los índices siguientes", () => {
+    // El índice del zip es la POSICIÓN en el vector. Con el contador de
+    // insertados (`out.size`), la tercera entrada se registraba como "1" y
+    // resolvía a los bytes de OTRA imagen: palabra con imagen equivocada sin
+    // ningún aviso. Anki nunca emite entradas sin nombre, pero un exportador
+    // de terceros sí puede.
+    const proto = hexToBytes("0a22" + CAT_ENTRY + "0a02" + "1005" + "0a2b" + DOG_ENTRY);
+    const r = parse(
+      withMedia(
+        {
+          notes: [[1, ['<img src="dog and bone.png">', "perro", "The dog barks."].join("\x1f"), 2]],
+          v3: true,
+        },
+        // "0" y "2" existen; no hay "1", como no hay nombre para él.
+        { map: zstdRaw(proto), files: { "0": CAT, "2": DOG } },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.media["dog and bone.png"]).toEqual(DOG);
+    // Y la primera sigue resolviendo a su propio fichero, no al desplazado.
+    expect(r.media["cat.jpg"]).toEqual(CAT);
+  });
+
   it("un mapa media corrupto deja el mazo entero importable", () => {
     const r = parse(
       withMedia({ notes: SAMPLE }, { map: new TextEncoder().encode("esto no es json"), files: {} }),
@@ -377,6 +397,21 @@ describe("el .apkg se parsea", () => {
     expect(() => parse(zipSync({ media: new TextEncoder().encode("{}") }))).toThrow(
       /collection\.anki2/,
     );
+  });
+
+  it("meta sin anki21b: cae a collection.anki2 en vez de TypeError", () => {
+    // Zip mixto de un exportador de terceros o corrupto a medias: trae `meta`
+    // pero no la base v3. Antes del arreglo, `files[dbKey]!` era `undefined` e
+    // `isZstd(undefined)` reventaba con `TypeError` — un mensaje que miente
+    // sobre la causa y que el worker encima envolvía en `{ok:false}`. Ahora
+    // cae al buscador general: aquí encuentra el dummy y lo importa como tal,
+    // que es mejor que un críptico.
+    const files = unzipSync(buildApkg({ notes: SAMPLE, v3: true }));
+    delete files["collection.anki21b"];
+    const r = parse(zipSync(files));
+    expect(r.ok).toBe(true);
+    expect(r.notes).toHaveLength(1);
+    expect(r.notes[0]!.fields.some((f) => f.includes("newer version"))).toBe(true);
   });
 });
 

@@ -40,7 +40,7 @@ async function cascade(ids: number[]): Promise<void> {
  */
 export async function deleteWords(ids: number[]): Promise<number> {
   if (!ids.length) return 0;
-  // `db.tables` y no la lista con nombre: la cascada toca 7 tablas y la
+  // `db.tables` y no la lista con nombre: la cascada toca 8 tablas y la
   // sobrecarga con tipado llega a 5. Anidarlas no vale — Dexie exige que la
   // transacción hija esté dentro de las tablas de la padre
   // ("SubTransactionError: Table examples not included in parent transaction").

@@ -186,8 +186,8 @@ class VocabDB extends Dexie {
       decks: "++id, name, kind",
       settings: "key",
     });
-    // v2 añade `media` sin tocar nada más. Dexie exige re-declarar las 10
-    // tablas completas: omitir una la borraría con todos sus datos
+    // v2 añade `media` sin tocar nada más. Dexie exige re-declarar los 11
+    // stores completos: omitir uno lo borraría con todos sus datos
     // (`deleteRemovedTables`). Al ser puramente aditiva no necesita
     // `.upgrade()`: `createMissingTables` la crea vacía y los datos viejos
     // ni se enteran.

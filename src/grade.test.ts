@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import { DEFAULT_THRESHOLD, gradeTyping, hasTypingContext } from "./grade";
+import { expectedWord } from "./identity";
 
 /**
  * Anki NO califica la respuesta escrita: el manual lo dice ("does not change how
@@ -10,6 +11,36 @@ import { DEFAULT_THRESHOLD, gradeTyping, hasTypingContext } from "./grade";
 describe("gradeTyping", () => {
   it("exacto → Fácil", () => {
     expect(gradeTyping("run", "run").suggested).toBe(4);
+  });
+
+  it("solo vale la forma exacta del contexto, no el infinitivo", () => {
+    // "He cries…": la respuesta es "cries". Escribir "cry" da "cr" en verde
+    // y la "y" en rojo: cerca, pero no es lo que la frase pide.
+    expect(gradeTyping("cries", "cries").suggested).toBe(4);
+    const r = gradeTyping("cries", "cry");
+    expect(r.comparison.exact).toBe(false);
+    expect(r.suggested).toBe(1);
+    expect(r.comparison.typedLine.map((t) => `${t.kind}:${t.text}`).join("|")).toBe(
+      "good:cr|bad:y",
+    );
+  });
+
+  it("la forma exacta admite mayúsculas y espacios", () => {
+    expect(gradeTyping("cries", "Cries").suggested).toBe(4);
+    expect(gradeTyping("cries", "  cries  ").suggested).toBe(4);
+  });
+
+  it("al final de frase, lo correcto da Fácil (sin el punto)", () => {
+    // "I love apples.": lo esperado es "apples" y escribirlo da 4. Con el
+    // punto adherido daba 6/7 → "Difícil" a una respuesta correcta.
+    expect(
+      gradeTyping(expectedWord({ lemma: "apple" }, "I love apples."), "apples").suggested,
+    ).toBe(4);
+  });
+
+  it("otra palabra sigue saliendo mal", () => {
+    expect(gradeTyping("cry", "dog").suggested).toBe(1);
+    expect(gradeTyping("cry", "cry cry").suggested).toBe(1);
   });
 
   it("un error en palabra larga → Difícil, no Otra vez", () => {

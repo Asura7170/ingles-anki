@@ -9,6 +9,9 @@ coverage
 # Material de referencia personal, ajeno al proyecto.
 docs/
 
+# Mazos .apkg de prueba (pesados, solo locales).
+apkg test/
+
 *.local
 .DS_Store
 .vitest/

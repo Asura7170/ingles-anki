@@ -1,5 +1,5 @@
 import { db, type Example, type Node, type Source, type SourceKind } from "./db";
-import { freqRank, isNGSL, loadFrequency } from "./identity";
+import { freqRank, isNGSL, isNoiseTranslation, loadFrequency } from "./identity";
 import { newCard } from "./srs";
 
 /**
@@ -101,9 +101,33 @@ async function attachTranslations(nodeId: number, item: IngestItem, sourceKind: 
 
   // Fusión por union: nunca sobrescribe. La IA añade alternativa marcada.
   const set = new Set(sense.translations);
-  const before = set.size;
-  for (const t of incoming) set.add(t);
-  if (set.size === before) return;
+  let changed = false;
+  for (const t of incoming) {
+    if (!set.has(t)) {
+      set.add(t);
+      changed = true;
+    }
+  }
+  // En re-import apkg, podar el ruido viejo (POS/pronunciación/formas): la
+  // unión nunca borra y si no el reverso seguiría mostrando krái/verb de
+  // importaciones anteriores. Solo si el sentido sigue siendo autoridad del
+  // import (`translationSource` de la IA = lo tocó el LLM/usuario y el import
+  // no manda sobre ello): podar a ciegas borraba restauraciones como
+  // "música" y `collectMissing` ya no las recuperaba (el sentido no queda
+  // vacío). Lo que ESTA importación trae se respeta (`dropAll` de mapFields
+  // deja chips todo-ruido a propósito antes que "Sin traducción": podarlos
+  // aquí en el mismo pase haría esa decisión letra muerta).
+  // ponytail: proveniencia por traducción = cambio de schema; hoy
+  // el sentido entero es la granularidad que hay.
+  if (sourceKind === "apkg" && sense.translationSource !== "ai") {
+    const headword = item.headword;
+    const fresh = new Set(incoming);
+    for (const t of [...set]) {
+      if (fresh.has(t)) continue;
+      if (isNoiseTranslation(t, headword) && set.delete(t)) changed = true;
+    }
+  }
+  if (!changed) return;
 
   await db.senses.update(sense.id!, {
     translations: [...set],

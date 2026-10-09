@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { extractCandidates, blankSentence } from "./identity";
+import { extractCandidates, blankSentence, expectedWord } from "./identity";
 
 /**
  * El pipeline que convierte una transcripción en candidatos de mazo. Es donde
@@ -110,12 +110,17 @@ describe("blankSentence", () => {
     const r = blankSentence("The noise startled the horses.", { lemma: "startle" });
     expect(r).not.toBeNull();
     expect(r!.before).toBe("The noise ");
+    // Y devuelve la forma original: la respuesta esperada es "startled", no
+    // el lemma. Sin esto el reverso mostraba el lemma en vez de lo que la
+    // frase pedía.
+    expect(r!.word).toBe("startled");
     expect(r!.after).toBe(" the horses.");
   });
 
   it("coloca el hueco sobre la forma observada, no sobre el lemma", () => {
     const r = blankSentence("She runs every morning.", { lemma: "run" });
     expect(r!.before).toBe("She ");
+    expect(r!.word).toBe("runs");
     expect(r!.after).toBe(" every morning.");
   });
 
@@ -133,5 +138,27 @@ describe("blankSentence", () => {
   it("funciona con frases (kind phrase)", () => {
     const r = blankSentence("I gave up after three miles.", { lemma: "give up" });
     expect(r).toBeNull();
+  });
+});
+
+describe("expectedWord", () => {
+  it("con hueco: la forma de la frase, no el lemma", () => {
+    expect(expectedWord({ lemma: "cry" }, "He cries when he is sad.")).toBe("cries");
+  });
+
+  it("al final de frase: sin el punto (el delimitador no es la palabra)", () => {
+    // "I love apples.": el token es "apples." pero lo esperado es "apples".
+    // Antes la respuesta era "apples." y escribir "apples" daba "Difícil".
+    expect(expectedWord({ lemma: "apple" }, "I love apples.")).toBe("apples");
+    const r = blankSentence("I love apples.", { lemma: "apple" })!;
+    expect(r.word).toBe("apples");
+    // La frase pintada conserva el punto: before + hueco + after es idéntica.
+    expect(r.before + "___" + r.after).toBe("I love ___.");
+    expect(r.before + r.after).toBe("I love .");
+  });
+
+  it("sin frase o sin hueco: el lemma", () => {
+    expect(expectedWord({ lemma: "cry" }, undefined)).toBe("cry");
+    expect(expectedWord({ lemma: "cry" }, "Nothing relevant here.")).toBe("cry");
   });
 });

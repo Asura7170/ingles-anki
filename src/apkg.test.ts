@@ -80,6 +80,34 @@ const asFile = (zip: Uint8Array) =>
 /** Lo que el worker hace: parsear fuera del hilo principal. */
 const direct = (buffer: ArrayBuffer) => Promise.resolve(parseApkgBytes(buffer, SQL));
 
+/** .apkg mínimo con las notas dadas (campos ya unidos por \x1f), sin media. */
+function buildNotesApkg(deck: string, fldsList: string[]): Uint8Array {
+  const dbh = new SQL.Database();
+  dbh.run(`CREATE TABLE col (id INTEGER PRIMARY KEY, models TEXT, decks TEXT)`);
+  dbh.run(
+    `CREATE TABLE notes (id INTEGER PRIMARY KEY, nid INTEGER, mid INTEGER, mod INTEGER, usn INTEGER, tags TEXT, flds TEXT, sfld INTEGER, csum INTEGER, flags INTEGER, data TEXT)`,
+  );
+  dbh.run(
+    `CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER, ord INTEGER, mod INTEGER, type INTEGER, queue INTEGER, due INTEGER, ivl INTEGER, factor INTEGER, reps INTEGER, lapses INTEGER, left INTEGER, odue INTEGER, odid INTEGER, flags INTEGER, data TEXT)`,
+  );
+  dbh.run(`INSERT INTO col VALUES (1, '{}', ?)`, [JSON.stringify({ 2: { name: deck } })]);
+  fldsList.forEach((flds, i) => {
+    const nid = i + 1;
+    dbh.run(`INSERT INTO notes (id, nid, mid, mod, usn, tags, flds) VALUES (?,?,1,0,0,'',?)`, [
+      nid,
+      nid,
+      flds,
+    ]);
+    dbh.run(`INSERT INTO cards (id, nid, did, ord) VALUES (?,?,2,0)`, [nid, nid]);
+  });
+  const zip = zipSync({
+    "collection.anki2": new Uint8Array(dbh.export()),
+    media: new TextEncoder().encode("{}"),
+  });
+  dbh.close();
+  return zip;
+}
+
 beforeEach(async () => {
   globalThis.indexedDB = new IDBFactory();
   await db.delete();
@@ -109,6 +137,167 @@ describe("importApkg sin worker", () => {
 
     const plain = (await db.nodes.where("lemma").equals("study").first())!;
     expect(await db.media.where("nodeId").equals(plain.id!).count()).toBe(0);
+  });
+
+  it("campo-código primero: la palabra es el campo 1, no el ID", async () => {
+    // Mazos como "1000 Basic English Words" traen un ID en el campo 0
+    // ("1000BEW_B01_U01_001") y la palabra en el 1. Sin el salto, el ID
+    // acababa de lemma y el mazo entero era basura.
+    const dbh = new SQL.Database();
+    dbh.run(`CREATE TABLE col (id INTEGER PRIMARY KEY, models TEXT, decks TEXT)`);
+    dbh.run(
+      `CREATE TABLE notes (id INTEGER PRIMARY KEY, nid INTEGER, mid INTEGER, mod INTEGER, usn INTEGER, tags TEXT, flds TEXT, sfld INTEGER, csum INTEGER, flags INTEGER, data TEXT)`,
+    );
+    dbh.run(
+      `CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER, ord INTEGER, mod INTEGER, type INTEGER, queue INTEGER, due INTEGER, ivl INTEGER, factor INTEGER, reps INTEGER, lapses INTEGER, left INTEGER, odue INTEGER, odid INTEGER, flags INTEGER, data TEXT)`,
+    );
+    dbh.run(`INSERT INTO col VALUES (1, '{}', ?)`, [
+      JSON.stringify({ 2: { name: "1000 Basic English Words" } }),
+    ]);
+    const flds = [
+      "1000BEW_B01_U01_001",
+      "cry",
+      "krái",
+      "verb",
+      "to show sadness",
+      "He cries when he is sad.",
+      "cries",
+    ].join("\x1f");
+    dbh.run(`INSERT INTO notes (id, nid, mid, mod, usn, tags, flds) VALUES (1,1,1,0,0,'',?)`, [
+      flds,
+    ]);
+    dbh.run(`INSERT INTO cards (id, nid, did, ord) VALUES (1,1,2,0)`);
+    const zip = zipSync({
+      "collection.anki2": new Uint8Array(dbh.export()),
+      media: new TextEncoder().encode("{}"),
+    });
+    dbh.close();
+
+    const r = await importApkg(asFile(zip), direct);
+    expect(r.deckName).toBe("1000 Basic English Words");
+    expect(r.result.created).toBe(1);
+    expect(await db.nodes.where("lemma").equals("cry").first()).toBeTruthy();
+    // El código no crea nodo: un solo lemma en la base.
+    expect(await db.nodes.count()).toBe(1);
+    // Y el reverso trae la definición, no el ruido: ni POS, ni
+    // pronunciación, ni la forma flexionada otra vez.
+    const cry = (await db.nodes.where("lemma").equals("cry").first())!;
+    const sense = (await db.senses.where("nodeId").equals(cry.id!).first())!;
+    expect(sense.translations).toEqual(["to show sadness"]);
+  });
+
+  it("la definición larga no roba el ejemplo: gana donde aparece la palabra", async () => {
+    // "to make a car move" (5 palabras) es más larga que "He drives to work."
+    // (4). Con "más largo" de ejemplo, la card caía a rama word-only aunque la
+    // frase estaba en el mazo.
+    const r = await importApkg(
+      asFile(
+        buildNotesApkg("1000 Basic English Words", [
+          [
+            "DRV_01",
+            "drive",
+            "dráiv",
+            "verb",
+            "to make a car move",
+            "He drives to work.",
+            "drives",
+          ].join("\x1f"),
+        ]),
+      ),
+      direct,
+    );
+    expect(r.result.created).toBe(1);
+    const drive = (await db.nodes.where("lemma").equals("drive").first())!;
+    const ex = await db.examples.where("nodeId").equals(drive.id!).toArray();
+    expect(ex.map((e) => e.text)).toEqual(["He drives to work."]);
+  });
+
+  it("stopwords y muletillas entran igual: en un .apkg todo es vocabulario", async () => {
+    // have/like/think/know/ill los mataban FILLERS/STOPWORDS (pensados para
+    // transcripciones) y la nota se saltaba entera.
+    const r = await importApkg(
+      asFile(
+        buildNotesApkg("1000 Basic English Words", [
+          ["have", "hǽv", "verb", "to own", "They have a car.", "have"].join("\x1f"),
+          ["like", "láik", "verb", "to enjoy", "She likes tea.", "likes"].join("\x1f"),
+          ["ill", "íl", "adjective", "not well", "He is ill.", "ill"].join("\x1f"),
+        ]),
+      ),
+      direct,
+    );
+    expect(r.result.created).toBe(3);
+    expect(r.skipped).toBe(0);
+    for (const lemma of ["have", "like", "ill"]) {
+      expect(await db.nodes.where("lemma").equals(lemma).first()).toBeTruthy();
+    }
+    // lemmaOf unificado: "like" encuentra su ejemplo ("likes"→like) y "have"
+    // no se queda como su propia traducción. Antes `identify` a secas dejaba
+    // a los stopwords sin cloze ni ejemplo.
+    const like = (await db.nodes.where("lemma").equals("like").first())!;
+    expect(
+      (await db.examples.where("nodeId").equals(like.id!).toArray()).map((e) => e.text),
+    ).toEqual(["She likes tea."]);
+    const have = (await db.nodes.where("lemma").equals("have").first())!;
+    const haveSense = (await db.senses.where("nodeId").equals(have.id!).first())!;
+    expect(haveSense.translations).toEqual(["to own"]);
+  });
+
+  it("re-import poda el ruido viejo sin tocar lo legítimo", async () => {
+    // La unión nunca borra: sin poda, krái/verb de importaciones anteriores
+    // seguirían en el reverso aunque el mapeo ya no los genere.
+    const fields = (ex: string) =>
+      ["W_01", "watch", "wɑ́tʃ", "verb", "to look at something", ex, "watches"].join("\x1f");
+    const first = await importApkg(
+      asFile(buildNotesApkg("W", [fields("They watch a movie.")])),
+      direct,
+    );
+    expect(first.result.created).toBe(1);
+    const node = (await db.nodes.where("lemma").equals("watch").first())!;
+    const sense = (await db.senses.where("nodeId").equals(node.id!).first())!;
+    // Ruido de una importación vieja + traducción legítima (del LLM o a mano).
+    await db.senses.update(sense.id!, { translations: ["wɑ́tʃ", "verb", "mirar"] });
+    const second = await importApkg(
+      asFile(buildNotesApkg("W", [fields("They watch a movie every night.")])),
+      direct,
+    );
+    expect(second.result.changed).toBe(1);
+    const after = (await db.senses.where("nodeId").equals(node.id!).first())!;
+    expect(after.translations).toEqual(["mirar", "to look at something"]);
+  });
+
+  it("re-import no poda lo que restauró el LLM (sentido tocado por la IA)", async () => {
+    // "música" cae como ruido de "music" y solo vuelve vía LLM. El re-import
+    // la podaba del conjunto mezclado y `collectMissing` ya no la recuperaba
+    // (el sentido no queda vacío): pérdida silenciosa en cada re-import.
+    const v1 = ["M_01", "music", "noun", "música", "Music is life."].join("\x1f");
+    await importApkg(asFile(buildNotesApkg("M", [v1])), direct);
+    const node = (await db.nodes.where("lemma").equals("music").first())!;
+    const sense = (await db.senses.where("nodeId").equals(node.id!).first())!;
+    expect(sense.translations).toEqual([]);
+    // El LLM rellena el sentido vacío (así lo deja `mergeTranslations`).
+    await db.senses.update(sense.id!, { translations: ["música"], translationSource: "ai" });
+    // El mazo actualizado trae una traducción legítima nueva: la unión la
+    // añade, pero "música" debe sobrevivir.
+    const v2 = ["M_01", "music", "noun", "música", "la música es vida", "Music is life."].join(
+      "\x1f",
+    );
+    await importApkg(asFile(buildNotesApkg("M", [v2])), direct);
+    const after2 = (await db.senses.where("nodeId").equals(node.id!).first())!;
+    expect(after2.translations).toContain("música");
+    expect(after2.translations).toContain("la música es vida");
+  });
+
+  it("primera import de nota todo-ruido: el chip se conserva (dropAll)", async () => {
+    // `mapFields` deja el ruido a propósito antes que "Sin traducción"; la
+    // poda lo borraba en el mismo pase porque no distinguía primera de
+    // re-import (su comentario dice "ruido viejo… de anteriores").
+    await importApkg(
+      asFile(buildNotesApkg("M", [["M_01", "music", "noun", "música"].join("\x1f")])),
+      direct,
+    );
+    const node = (await db.nodes.where("lemma").equals("music").first())!;
+    const sense = (await db.senses.where("nodeId").equals(node.id!).first())!;
+    expect(sense.translations).toEqual(["noun", "música"]);
   });
 });
 

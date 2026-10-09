@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, type Ease } from "../db";
 import { useApp } from "../store";
-import { blankSentence } from "../identity";
+import { blankSentence, expectedWord } from "../identity";
 import { speak, stop as stopTts } from "../tts";
 import CardImage from "./CardImage";
 import { makeShortcutHandler, useSentenceTranslation } from "../shortcuts";
@@ -98,6 +98,11 @@ export default function Study() {
 
       <div className="study-body">
         <div className="cloze">
+          {/* El lemma como título, SOLO al revelar: en el anverso la palabra
+              está oculta por diseño (cloze) y mostrarla arruinaría el repaso.
+              La respuesta de abajo es la forma de la frase ("cries"); el
+              título es la unidad enseñada ("cry"). */}
+          {revealed ? <div className="word-title">{node.lemma}</div> : null}
           <CardImage nodeId={node.id!} />
           {hasContext ? (
             <p className="sentence">
@@ -156,7 +161,7 @@ export default function Study() {
             <Revealed
               comparison={comparison}
               typed={typed}
-              answer={node.lemma}
+              answer={expectedWord(node, sentence)}
               translations={translations}
               sentence={sentence}
               sentenceTranslation={sense?.sentenceTranslation}

@@ -26,6 +26,10 @@ export function gradeTyping(
 ): GradeResult {
   if (!typed.trim()) return { comparison: compareAnswer(expected, ""), suggested: null };
 
+  // Sin atajos por lemma: vale la forma exacta del contexto ("cries"), no el
+  // infinitivo ("cry" da "cr" verde + "y" roja). La respuesta esperada ya es
+  // la palabra de la frase (store la calcula), así que aquí no hay nada que
+  // perdonar.
   const comparison = compareAnswer(expected, typed);
   let suggested: Ease;
 

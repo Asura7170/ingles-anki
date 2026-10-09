@@ -1,7 +1,7 @@
 import type { IngestResult } from "./ingest";
 import { ingest, type IngestItem } from "./ingest";
 import { db } from "./db";
-import { identify } from "./identity";
+import { identify, fallbackIdentity, isNoiseTranslation, lemmaOf } from "./identity";
 import { MAX_IMAGE_BYTES, mimeOf, rootOf, type ApkgNote, type ApkgOut } from "./apkg-format";
 
 let worker: Worker | null = null;
@@ -38,9 +38,33 @@ function runWorker(buffer: ArrayBuffer): Promise<ApkgOut> {
 }
 
 /**
- * Mapeo heurístico de campos. field[0] = palabra; el campo más largo con >=5
- * palabras = ejemplo; el resto = traducciones. Los .apkg no tienen contrato
- * sobre qué campo es qué, así que esto es mejor que nada y no peor.
+ * El campo 0 a veces es un código ("1000BEW_B01_U01_001"), no la palabra.
+ * Con minúsculas no es código ("COVID-19", "Chapter 5" se quedan); sin
+ * dígito tampoco ("TV" se queda). Heurística, como todo en esta función.
+ */
+const isCode = (f: string) =>
+  /\d/.test(f) && !/[a-z]/.test(f) && (f.includes("_") || /^[\d]/.test(f));
+
+/**
+ * ¿Menciona el campo a la palabra (en cualquier flexión)? Es el mismo
+ * `lemmaOf` que usa `blankSentence` para dibujar el hueco: si dice que sí,
+ * el hueco existe por construcción.
+ */
+function mentionsHeadword(field: string, lemma: string | undefined): boolean {
+  if (!lemma) return false;
+  return field.split(/\s+/).some((tok) => lemmaOf(tok) === lemma);
+}
+
+/**
+ * Mapeo heurístico de campos. field[0] = palabra (o el primer campo que no
+ * sea código); ejemplo = el campo donde APARECE la palabra, no el más largo;
+ * el resto = traducciones. Los .apkg no tienen contrato sobre qué campo es
+ * qué, así que esto es mejor que nada y no peor.
+ *
+ * El "más largo" elegía definiciones ("to make a car move" le ganaba a "He
+ * drives to work.") y la card caía a rama word-only: la frase existe en el
+ * mazo pero no se mostraba. El fallback conserva la regla vieja para mazos
+ * donde la palabra no aparece en ningún campo.
  */
 function mapFields(fields: string[]): {
   headword: string;
@@ -48,21 +72,42 @@ function mapFields(fields: string[]): {
   example?: string;
 } {
   const clean = fields.filter(Boolean);
-  const headword = clean[0] ?? "";
-  const rest = clean.slice(1);
+  // Salta códigos iniciales: el ID va primero y la palabra después. El tope
+  // guarda el último: si TODO son códigos, headword es el último y no "".
+  let start = 0;
+  while (start < clean.length - 1 && isCode(clean[start]!)) start++;
+  const headword = clean[start] ?? "";
+  // Los códigos no son traducciones en ninguna posición: el ID va primero,
+  // pero si aparece en medio tampoco traduce nada.
+  const rest = clean.filter((_, i) => i !== start && !isCode(clean[i]!));
+  const lemma = lemmaOf(headword);
 
-  let example = "";
-  let exampleIdx = -1;
-  rest.forEach((f, i) => {
-    if (f.split(/\s+/).length >= 5 && f.length > example.length) {
-      example = f;
-      exampleIdx = i;
+  const longest = (pool: { f: string; i: number }[]): { f: string; i: number } | undefined => {
+    let best: { f: string; i: number } | undefined;
+    for (const c of pool) {
+      if (!best || c.f.length > best.f.length) best = c;
     }
-  });
+    return best;
+  };
+
+  // Primero la frase (≥3 palabras: "They watch a movie." tiene 4); si ninguna
+  // la menciona, la regla vieja (más largo con ≥5).
+  const withWord = rest
+    .map((f, i) => ({ f, i }))
+    .filter(({ f }) => f.split(/\s+/).length >= 3 && mentionsHeadword(f, lemma));
+  const legacy = rest.map((f, i) => ({ f, i })).filter(({ f }) => f.split(/\s+/).length >= 5);
+  const pick = longest(withWord.length ? withWord : legacy);
+  const example = pick?.f ?? "";
+  const exampleIdx = pick?.i ?? -1;
+
+  // Ruido de diccionario fuera de traducciones (POS, formas, pronunciación).
+  // Si TODO es ruido no se quita nada: antes un chip raro que "Sin traducción".
+  const noisy = rest.map((f) => isNoiseTranslation(f, headword));
+  const dropAll = noisy.every(Boolean);
 
   return {
     headword,
-    translations: rest.filter((_, i) => i !== exampleIdx),
+    translations: rest.filter((_, i) => i !== exampleIdx && (dropAll || !noisy[i])),
     example: example || undefined,
   };
 }
@@ -132,7 +177,7 @@ export async function importApkg(
   // lo que permite detectar cambios al reimportar.
   for (const note of raw.notes as ApkgNote[]) {
     const mapped = mapFields(note.fields);
-    const id = identify(mapped.headword);
+    const id = identify(mapped.headword) ?? fallbackIdentity(mapped.headword);
     if (!id) {
       skipped++;
       continue;

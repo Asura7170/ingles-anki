@@ -42,9 +42,11 @@ function buildApkg(opts: {
   /**
    * `true` = layout v3 (Anki 23.10+): la real es `collection.anki21b`, y el
    * exportador escribe además un `collection.anki2` DUMMY. Por defecto legacy:
-   * la real es `collection.anki2`.
+   * la real es `collection.anki2`. `base` permite el nombre que escribe el
+   * Anki nuevo (`collection.anki21`).
    */
   v3?: boolean;
+  base?: "collection.anki21b" | "collection.anki21";
 }): Uint8Array {
   const db = new SQL.Database();
 
@@ -87,11 +89,12 @@ function buildApkg(opts: {
     return zipSync({ "collection.anki2": exported, media: new TextEncoder().encode("{}") });
   }
 
-  // Layout v3: la real es anki21b y el anki2 es un dummy con una sola nota que
-  // dice "This file requires a newer version of Anki." — igual que hace
-  // `write_dummy_collection` en el exportador de Anki. Con esquema completo
-  // (col incluida): un dummy sin tablas no es una base válida y el fallback
-  // del lector reventaría en `readDeckNames` en vez de devolver la nota.
+  // Layout v3: la real es anki21b (o anki21 en el Anki nuevo) y el anki2 es
+  // un dummy con una sola nota que dice "Please update to the latest Anki
+  // version…" — el texto real de `write_dummy_collection` en el exportador
+  // de Anki. Con esquema completo (col incluida): un dummy sin tablas no es
+  // una base válida y el fallback del lector reventaría en `readDeckNames`
+  // en vez de devolver la nota.
   const dummy = new SQL.Database();
   dummy.run(`CREATE TABLE col (id INTEGER PRIMARY KEY, models TEXT, decks TEXT)`);
   dummy.run(`INSERT INTO col VALUES (1, '{}', '{}')`);
@@ -102,14 +105,17 @@ function buildApkg(opts: {
     `CREATE TABLE notes (id INTEGER PRIMARY KEY, nid INTEGER, mid INTEGER, mod INTEGER, usn INTEGER, tags TEXT, flds TEXT, sfld INTEGER, csum INTEGER, flags INTEGER, data TEXT)`,
   );
   dummy.run(`INSERT INTO notes (id, nid, mid, mod, usn, tags, flds) VALUES (1,1,1,0,0,'',?)`, [
-    ["", "This file requires a newer version of Anki."].join("\x1f"),
+    [
+      "",
+      "Please update to the latest Anki version, then import the .colpkg/.apkg file again.",
+    ].join("\x1f"),
   ]);
   const dummyBytes = new Uint8Array(dummy.export());
   dummy.close();
 
   return zipSync({
     meta: new Uint8Array([0x08, 0x03]), // PackageMetadata{ version: 3 }
-    "collection.anki21b": exported,
+    [opts.base ?? "collection.anki21b"]: exported,
     "collection.anki2": dummyBytes,
     media: new TextEncoder().encode("{}"),
   });
@@ -303,6 +309,27 @@ describe("el .apkg se parsea", () => {
     expect(r.media["dog and bone.png"]).toEqual(DOG);
   });
 
+  it("v3 con mapa JSON (no protobuf): el contenido manda, no `meta`", () => {
+    // Layout real en circulación: trae `meta` pero el mapa es JSON plano.
+    // Antes `meta` elegía protobuf, el mapa salía vacío y TODAS las imágenes
+    // se perdían en silencio (`skippedImages` las contaba sin que nadie
+    // mirara por qué).
+    const r = parse(
+      withMedia(
+        {
+          notes: [[1, ['<img src="cat.jpg">', "gato", "The cat sleeps."].join("\x1f"), 2]],
+          v3: true,
+        },
+        {
+          map: new TextEncoder().encode('{"0":"cat.jpg"}'),
+          files: { "0": CAT },
+        },
+      ),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.media["cat.jpg"]).toEqual(CAT);
+  });
+
   it("recoge el <img> de todos los campos, no sólo del ejemplo", () => {
     // La imagen es de la palabra, no de la frase. Y si el texto de la frase
     // llevara el <img>, `blankSentence` trocearía por espacios y `identify`
@@ -437,15 +464,33 @@ describe("el .apkg se parsea", () => {
     expect(parse(buildApkg({ notes: [] })).notes).toEqual([]);
   });
 
-  // El bug. `DB_FILES` buscaba `collection.anki2` primero, y en un .apkg moderno
-  // ese nombre es el DUMMY que escribe el exportador: el mazo entero se
-  // importaba como una nota que dice "This file requires a newer version of
-  // Anki.". Un .apkg real habría delatado el orden; el fixture no lo tenía.
+  // El bug. El selector elegía por NOMBRE (`anki2` primero) y en un .apkg
+  // moderno ese nombre es el DUMMY: el mazo entero se importaba como una nota
+  // "Please update to the latest Anki version…" en un deck "Default". Ahora
+  // elige por nº de notas y el dummy (0–1) nunca gana a la real.
   it("layout v3: lee anki21b, no el collection.anki2 dummy", () => {
     const r = parse(buildApkg({ notes: SAMPLE, v3: true }));
     expect(r.notes).toHaveLength(3);
     expect(r.notes.map((n) => n.fields[0])).toEqual(["run", "study", "startle"]);
-    expect(r.notes.some((n) => n.fields.some((f) => f.includes("newer version")))).toBe(false);
+    expect(r.notes.some((n) => n.fields.some((f) => f.includes("Anki version")))).toBe(false);
+  });
+
+  it("layout v3 con base anki21 (Anki nuevo): lee la real", () => {
+    // El archivo real que delató el bug traía la base como `anki21`, no
+    // `anki21b`. Con nombres solos caía al dummy; por nº de notas da igual
+    // cómo se llame.
+    const r = parse(buildApkg({ notes: SAMPLE, v3: true, base: "collection.anki21" }));
+    expect(r.notes).toHaveLength(3);
+    expect(r.notes.map((n) => n.fields[0])).toEqual(["run", "study", "startle"]);
+  });
+
+  it("sin meta con dummy+real: gana la de más notas", () => {
+    // Exportador de terceros sin `meta`: el guardia por nombre no aplica y
+    // antes ganaba el dummy por orden de lista.
+    const files = unzipSync(buildApkg({ notes: SAMPLE, v3: true }));
+    delete files.meta;
+    const r = parse(zipSync(files));
+    expect(r.notes).toHaveLength(3);
   });
 
   it("layout v3 sin anki21b legible: el dummy no enmascara el error", () => {
@@ -458,19 +503,75 @@ describe("el .apkg se parsea", () => {
     );
   });
 
-  it("meta sin anki21b: cae a collection.anki2 en vez de TypeError", () => {
-    // Zip mixto de un exportador de terceros o corrupto a medias: trae `meta`
-    // pero no la base v3. Antes del arreglo, `files[dbKey]!` era `undefined` e
-    // `isZstd(undefined)` reventaba con `TypeError` — un mensaje que miente
-    // sobre la causa y que el worker encima envolvía en `{ok:false}`. Ahora
-    // cae al buscador general: aquí encuentra el dummy y lo importa como tal,
-    // que es mejor que un críptico.
+  it("solo dummy (sin base real): error útil, no mazo mentira", () => {
+    // Zip a medias o truncado: trae `meta` y el dummy pero no la real. Antes
+    // caía al buscador general e importaba el marcador como un mazo "Default"
+    // con una card basura; ahora se dice lo que pasa.
     const files = unzipSync(buildApkg({ notes: SAMPLE, v3: true }));
     delete files["collection.anki21b"];
-    const r = parse(zipSync(files));
-    expect(r.ok).toBe(true);
+    expect(() => parse(zipSync(files))).toThrow(/marcador/);
+  });
+
+  it("dummy en español (versión con acento): también es marcador", () => {
+    // El regex solo veía "version" ASCII: el dummy ES se importaba como card
+    // basura. Se pliegan diacríticos y se casa el stem "vers".
+    const dummy = new SQL.Database();
+    dummy.run(`CREATE TABLE col (id INTEGER PRIMARY KEY, models TEXT, decks TEXT)`);
+    dummy.run(`INSERT INTO col VALUES (1, '{}', '{}')`);
+    dummy.run(
+      `CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER, ord INTEGER, mod INTEGER, type INTEGER, queue INTEGER, due INTEGER, ivl INTEGER, factor INTEGER, reps INTEGER, lapses INTEGER, left INTEGER, odue INTEGER, odid INTEGER, flags INTEGER, data TEXT)`,
+    );
+    dummy.run(
+      `CREATE TABLE notes (id INTEGER PRIMARY KEY, nid INTEGER, mid INTEGER, mod INTEGER, usn INTEGER, tags TEXT, flds TEXT, sfld INTEGER, csum INTEGER, flags INTEGER, data TEXT)`,
+    );
+    dummy.run(`INSERT INTO notes (id, nid, mid, mod, usn, tags, flds) VALUES (1,1,1,0,0,'',?)`, [
+      ["", "Por favor actualiza a la última versión de Anki e importa el archivo de nuevo."].join(
+        String.fromCharCode(0x1f),
+      ),
+    ]);
+    const dummyBytes = new Uint8Array(dummy.export());
+    dummy.close();
+    expect(() =>
+      parse(zipSync({ "collection.anki2": dummyBytes, media: new TextEncoder().encode("{}") })),
+    ).toThrow(/marcador/);
+  });
+
+  it("base única corrupta: error útil, no el crudo de sql.js", () => {
+    // El camino mono-candidato saltaba la validación y reventaba en
+    // `new SQL.Database` con inglés técnico.
+    expect(() => parse(zipSync({ "collection.anki2": new Uint8Array([1, 2, 3]) }))).toThrow(
+      /base válida/,
+    );
+  });
+
+  it("candidata con notes pero sin cards: pierde aunque tenga más notas", () => {
+    // `tryNoteCount` solo contaba `notes`: una base truncada ganaba por
+    // número y `buildCardDeck` reventaba con "no such table: cards" en el toast.
+    const sep = String.fromCharCode(0x1f);
+    const broken = new SQL.Database();
+    broken.run(`CREATE TABLE col (id INTEGER PRIMARY KEY, models TEXT, decks TEXT)`);
+    broken.run(`INSERT INTO col VALUES (1, '{}', '{}')`);
+    broken.run(
+      `CREATE TABLE notes (id INTEGER PRIMARY KEY, guid TEXT, mid INTEGER, mod INTEGER, usn INTEGER, tags TEXT, flds TEXT, sfld INTEGER, csum INTEGER, flags INTEGER, data TEXT)`,
+    );
+    for (let i = 1; i <= 5; i++) {
+      broken.run(
+        `INSERT INTO notes (id, guid, mid, mod, usn, tags, flds) VALUES (?,'g',1,0,0,'',?)`,
+        [i, `w${i}${sep}tr${i}`],
+      );
+    }
+    const brokenBytes = new Uint8Array(broken.export());
+    broken.close();
+    const sane = unzipSync(buildApkg({ notes: [[1, ["run", "correr"].join(sep), 2]] }));
+    const r = parse(
+      zipSync({
+        "collection.anki2": brokenBytes,
+        "collection.anki21b": sane["collection.anki2"]!,
+        media: new TextEncoder().encode("{}"),
+      }),
+    );
     expect(r.notes).toHaveLength(1);
-    expect(r.notes[0]!.fields.some((f) => f.includes("newer version"))).toBe(true);
+    expect(r.notes[0]!.fields[0]).toBe("run");
   });
 });
 

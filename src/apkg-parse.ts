@@ -20,8 +20,10 @@ import {
   type ApkgOut,
 } from "./apkg-format";
 
-/** Los tres nombres que ha usado Anki para la base del mazo. */
-const DB_FILES = ["collection.anki2", "collection.anki21b", "collection.anki21"];
+/** Las tres bases que ha usado Anki, de nueva a vieja. El orden ya NO decide
+ * (decide el nº de notas); solo desempata, y en empate gana la nueva porque
+ * el dummy siempre es `anki2`. */
+const DB_FILES = ["collection.anki21b", "collection.anki21", "collection.anki2"];
 
 /** Magic bytes de un frame zstd. */
 const isZstd = (b: Uint8Array) => b[0] === 0x28 && b[1] === 0xb5 && b[2] === 0x2f && b[3] === 0xfd;
@@ -90,16 +92,16 @@ function safeJson<T>(raw: string): T {
 /**
  * Lee el mapa `media` del zip: índice-en-texto → nombre original.
  *
- * Dos formatos, y la discriminadora es `meta`:
+ * Dos formatos, y la discriminadora es el CONTENIDO, no `meta`:
  *
  * - Legacy: JSON plano `{"0":"cat.jpg"}`.
  * - v3 (Anki 23.10+): zstd + protobuf `MediaEntries`. Cada entrada es un frame
  *   zstd independiente, como la colección, así que se descomprime con el mismo
  *   `isZstd`. El **orden del vector es el índice**; no hay un campo índice.
  *
- * En v1 del proto cada `MediaEntry` es `{ name=1, size=2, sha1=3 }`. Sólo hace
- * falta `name`. Si `meta` no está pero `media` sí, se asume legacy: es el mismo
- * criterio que usa Anki (`zstd_compressed() = !is_legacy()`).
+ * Hay zips v3 (con `meta`) cuyo mapa sigue siendo JSON plano: usar `meta`
+ * como discriminadora mandaba ese JSON al parser protobuf, que devolvía mapa
+ * vacío y TODAS las imágenes se perdían en silencio. Es el criterio de Anki.
  */
 function readMediaMap(files: Record<string, Uint8Array>): Map<string, string> {
   const raw = files.media;
@@ -107,19 +109,14 @@ function readMediaMap(files: Record<string, Uint8Array>): Map<string, string> {
   // ("older AnkiDroid versions wrote colpkg files without a media map").
   if (!raw) return new Map();
 
-  let bytes = raw;
-  if (isZstd(bytes)) {
+  if (isZstd(raw)) {
     try {
-      bytes = zstdDecompress(bytes) as Uint8Array<ArrayBuffer>;
+      return readProtoMediaMap(zstdDecompress(raw) as Uint8Array<ArrayBuffer>);
     } catch {
       return new Map(); // mejor sin imagen que sin mazo
     }
   }
-
-  const v3 = "meta" in files;
-  return v3
-    ? readProtoMediaMap(bytes)
-    : new Map(Object.entries(safeJson<Record<string, string>>(new TextDecoder().decode(bytes))));
+  return new Map(Object.entries(safeJson<Record<string, string>>(new TextDecoder().decode(raw))));
 }
 
 /**
@@ -247,24 +244,89 @@ function buildCardDeck(q: <T>(sql: string) => T[]): Map<number, number> {
 }
 
 /**
- * La base real del mazo. `meta` es la discriminadora, no el orden de `DB_FILES`:
- * desde Anki 23.10 el `.apkg` por defecto lleva `collection.anki21b` con los datos
- * y **además** un `collection.anki2` dummy con una nota de aviso. Como `find`
- * devuelve el primero que exista, el orden de `DB_FILES` solo elegía el dummy.
- *
- * Con las dos condiciones: un zip mixto (con `meta` pero sin `anki21b`, de un
- * exportador de terceros o corrupto a medias) cae al buscador general en vez
- * de reventar con `TypeError` en `files[dbKey]!`.
+ * Notas de una base candidata, o -1 si no abre (corrupta o no es sqlite) o
+ * no trae las tablas que el parseo necesita (`notes` sola no basta: sin
+ * `cards`/`decks`/`col` las queries de después revientan con SQL crudo).
+ * Así la elección no depende de nombres: el dummy trae 0–1 y la real N.
  */
-function findCollection(files: Record<string, Uint8Array>): string | undefined {
-  if ("meta" in files && "collection.anki21b" in files) return "collection.anki21b";
-  return DB_FILES.find((k) => k in files);
+function tryNoteCount(SQL: SqlJsStatic, bytes: Uint8Array): number {
+  try {
+    const raw = isZstd(bytes) ? zstdDecompress(bytes) : bytes;
+    const handle = new SQL.Database(raw as Uint8Array<ArrayBuffer>);
+    try {
+      const stmt = handle.prepare(`SELECT COUNT(*) AS c FROM notes`);
+      const c = stmt.step() ? (stmt.getAsObject() as { c: unknown }).c : -1;
+      stmt.free();
+      if (typeof c !== "number") return -1;
+      const t = handle.prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND (name='cards' OR name='decks' OR name='col')`,
+      );
+      const names = new Set<string>();
+      while (t.step()) names.add((t.getAsObject() as { name: unknown }).name as string);
+      t.free();
+      // `cards` + (`decks` o `col`): lo mínimo que `buildCardDeck`/`readDeckNames` leen.
+      return names.has("cards") && (names.has("decks") || names.has("col")) ? c : -1;
+    } finally {
+      handle.close();
+    }
+  } catch {
+    return -1;
+  }
+}
+
+/**
+ * El dummy de un .apkg v3: una sola nota con el aviso de actualizar Anki
+ * ("…newer version of Anki" en las viejas, "…latest Anki version…" en las
+ * nuevas). Se pliegan diacríticos y se usa el stem "vers" para pillar
+ * "versión"/"versão" (el `i` de JS no pliega acentos). Techo conocido: un
+ * mazo real de UNA nota que mencione literalmente "Anki … vers*" se
+ * rechaza igual — distinguirlo pediría el marcador exacto por locale.
+ * // ponytail: falso positivo aceptado, rarísimo en un mazo de vocabulario.
+ */
+function isDummyMarker(notes: ApkgNote[]): boolean {
+  const fold = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+  return (
+    notes.length <= 1 &&
+    notes.some((n) => n.fields.some((f) => /anki.{0,20}vers|vers.{0,20}anki/.test(fold(f))))
+  );
+}
+
+/**
+ * La base real del mazo: la candidata con más notas. Los nombres ya no
+ * deciden —el Anki nuevo escribe la real como `anki21` y no `anki21b`, y el
+ * `meta` de un exportador de terceros puede faltar—; con nombres solos el
+ * dummy `anki2` ganaba por orden de lista y el mazo se importaba como una
+ * nota "Please update to the latest Anki version" en un deck "Default".
+ *
+ * Si solo hay marcador (zip a medias o truncado), se devuelve igual y el
+ * llamador lo rechaza con error útil en vez de crear un mazo mentira.
+ */
+function findCollection(files: Record<string, Uint8Array>, SQL: SqlJsStatic): string | undefined {
+  const present = DB_FILES.filter((k) => k in files);
+  if (present.length === 0) return undefined;
+  // También el candidato único se valida: una base sola y corrupta llegaba
+  // hasta `new SQL.Database` y reventaba con el error crudo en inglés.
+  if (present.length === 1)
+    return tryNoteCount(SQL, files[present[0]!]!) < 0 ? undefined : present[0];
+  let best = present[0]!;
+  let bestN = -1;
+  for (const k of present) {
+    const n = tryNoteCount(SQL, files[k]!);
+    if (n > bestN) {
+      bestN = n;
+      best = k;
+    }
+  }
+  return bestN < 0 ? undefined : best;
 }
 
 export function parseApkgBytes(buffer: ArrayBuffer, SQL: SqlJsStatic): ApkgOut {
   const files = unzipSync(new Uint8Array(buffer));
-  const dbKey = findCollection(files);
-  if (!dbKey) throw new Error("El .apkg no contiene collection.anki2");
+  const dbKey = findCollection(files, SQL);
+  if (!dbKey)
+    throw new Error(
+      "El .apkg no trae una base válida (collection.anki2/anki21b/anki21 ausente o corrupta)",
+    );
 
   let bytes = files[dbKey]!;
   // Algunos exportadores comprimen la base con zstd.
@@ -305,6 +367,16 @@ export function parseApkgBytes(buffer: ArrayBuffer, SQL: SqlJsStatic): ApkgOut {
         images: [...new Set(raw.flatMap(findImages))],
         fields: raw.map(stripHtml),
       });
+    }
+
+    // Marcador de Anki y no un mazo: el dummy trae UNA nota que pide
+    // actualizar Anki, y `identify` no la salta (la frase entera acaba siendo
+    // el lemma). Importarlo creaba un mazo "Default" con una card basura.
+    // Mejor un error que un mazo mentira.
+    if (isDummyMarker(notes)) {
+      throw new Error(
+        "Este .apkg solo trae el marcador de Anki (pide actualizar Anki e importar de nuevo): falta la base real. Reexporta el mazo o vuelve a descargarlo.",
+      );
     }
 
     // Sólo lo que alguna nota referencia, y sólo las entradas que el mapa

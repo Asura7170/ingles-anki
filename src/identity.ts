@@ -310,6 +310,124 @@ export function identify(raw: string): Identity | null {
 }
 
 /**
+ * En un .apkg todo es vocabulario por decisión del usuario: los filtros de
+ * transcripciones no pueden saltar notas (have/like/think/know/ill… son
+ * palabras del mazo, no muletillas). Si `identify` dice null y queda texto
+ * con ≥2 letras, entra como identidad literal. `skipped` queda para lo que
+ * ni es texto.
+ */
+export function fallbackIdentity(raw: string): Identity | null {
+  // Mismos bordes que `clean`: "Have!" es "have", no un lemma aparte que
+  // ningún matching vuelve a encontrar (nodo duplicado e inigualable).
+  const text = clean(raw).replace(/\s+/g, " ");
+  if (text.replace(/[^\p{L}]/gu, "").length < 2) return null;
+  return { lemma: text, kind: text.includes(" ") ? "phrase" : "word" };
+}
+
+/**
+ * Un solo resolutor de lemma para el mundo .apkg: `identify` primero y
+ * `fallbackIdentity` después. Cuatro caminos (`mentionsHeadword`,
+ * `mapFields`, `isNoiseTranslation`, `blankSentence`) usaban `identify` a
+ * secas y dejaban sordos a los stopwords que el import sí habilita ("like"
+ * perdía su ejemplo y su cloze). `extractCandidates` NO lo usa: en texto
+ * saltar stopwords sigue siendo la intención.
+ */
+export const lemmaOf = (raw: string): string | undefined =>
+  (identify(raw) ?? fallbackIdentity(raw))?.lemma;
+
+/**
+ * Etiquetas gramaticales de diccionario. Set cerrado y minúsculas: un campo
+ * que ES la etiqueta no es traducción. Con punto opcional ("n.").
+ */
+const POS_TAGS = new Set([
+  "noun",
+  "verb",
+  "adjective",
+  "adverb",
+  "pronoun",
+  "preposition",
+  "conjunction",
+  "interjection",
+  "determiner",
+  "article",
+  "numeral",
+  "n",
+  "v",
+  "adj",
+  "adv",
+  "prep",
+  "conj",
+  "pron",
+  "interj",
+  "det",
+  "art",
+  "num",
+]);
+
+/** Esqueleto consonántico: minúsculas, sin diacríticos ni vocales, con
+ * equivalencias fonéticas (th→t, c/s→k). "krái"→"kr", "cry"→"kr". */
+function skeleton(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/θ/g, "t")
+    .replace(/ð/g, "t")
+    .replace(/ŋ/g, "n")
+    .replace(/ʃ/g, "s")
+    .replace(/ʒ/g, "z")
+    .replace(/th/g, "t")
+    .replace(/sh/g, "s")
+    .replace(/ph/g, "f")
+    .replace(/ch/g, "t") // watch→wtt, wɑ́tʃ→wtt (la ch de respelling es /tʃ/)
+    .replace(/[^a-z]/g, "")
+    .replace(/[aeiouy]/g, "")
+    .replace(/c/g, "k")
+    .replace(/s/g, "k");
+}
+
+/** Distancia de edición para esqueletos cortos (geminadas: fn/fnn). */
+function lev(a: string, b: string): number {
+  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) =>
+    Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
+  );
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      d[i]![j] = Math.min(
+        d[i - 1]![j]! + 1,
+        d[i]![j - 1]! + 1,
+        d[i - 1]![j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+  }
+  return d[a.length]![b.length]!;
+}
+
+/**
+ * ¿Este campo es ruido de diccionario y no traducción? Tres clases:
+ * etiqueta POS ("verb"), forma de la palabra ("cries"→cry) y pronunciación
+ * ("krái": mismo esqueleto que el headword + no-ASCII).
+ *
+ * Solo cae ASCII si es POS exacto o forma: una traducción normal ("correr",
+ * "animal") nunca coincide. Tradeoff documentado: un cognado acentuado
+ * ("música"→msk como "music") sí cae; solo vuelve vía LLM si el sentido queda
+ * vacío (`collectMissing` salta sentidos con algo), y un re-import con el
+ * sentido tocado por la IA no lo poda (ver `attachTranslations`).
+ */
+export function isNoiseTranslation(field: string, headword: string): boolean {
+  const t = field.trim();
+  if (!t || /\s/.test(t)) return false;
+  if (POS_TAGS.has(t.toLowerCase().replace(/\.$/, ""))) return true;
+  const lemma = lemmaOf(headword);
+  if (!lemma) return false;
+  if (lemmaOf(t) === lemma) return true;
+  if (!/[^\x00-\x7F]/.test(t)) return false;
+  const a = skeleton(t);
+  const b = skeleton(headword);
+  return a.length > 0 && b.length > 0 && a.length <= 12 && b.length <= 12 && lev(a, b) <= 1;
+}
+
+/**
  * Extrae candidatos de un texto: tokeniza, lematiza, cuenta ocurrencias y
  * conserva la frase más corta que contiene cada palabra.
  */
@@ -361,21 +479,45 @@ export function extractCandidates(text: string): Candidate[] {
 
 /**
  * Localiza la palabra dentro de la frase y devuelve las dos mitades para poder
- * dibujar el hueco. Usa `identify` para que la flexión coincida (`running` con
- * lemma `run`).
+ * dibujar el hueco, MÁS el token original: la respuesta esperada es la forma
+ * de la frase ("cries"), no el lemma ("cry"). Usa `lemmaOf` para que la
+ * flexión coincida (`running` con lemma `run`) y los stopwords del .apkg
+ * también tengan hueco.
+ *
+ * `word` es el núcleo sin puntuación de bordes ("apples", no "apples."): el
+ * delimitador no es forma de la frase y calificar contra "apples." marcaba
+ * "Difícil" una respuesta correcta. Los bordes se quedan en `before`/`after`
+ * para que la frase pintada no pierda el punto.
  */
 export function blankSentence(
   sentence: string,
   node: { lemma: string },
-): { before: string; after: string } | null {
+): { before: string; word: string; after: string } | null {
   const tokens = sentence.split(/(\s+)/);
   for (let i = 0; i < tokens.length; i++) {
-    const id = identify(tokens[i]!);
-    if (id?.lemma === node.lemma) {
-      return { before: tokens.slice(0, i).join(""), after: tokens.slice(i + 1).join("") };
-    }
+    if (lemmaOf(tokens[i]!) !== node.lemma) continue;
+    const tok = tokens[i]!;
+    const lead = /^\P{L}*/u.exec(tok)![0];
+    const tail = /\P{L}*$/u.exec(tok)![0];
+    const word = tok.slice(lead.length, tok.length - tail.length);
+    if (!word) continue;
+    return {
+      before: tokens.slice(0, i).join("") + lead,
+      word,
+      after: tail + tokens.slice(i + 1).join(""),
+    };
   }
   return null;
+}
+
+/**
+ * Lo que la card espera: la palabra tal como aparece en la frase, o el lemma
+ * si no hay frase (o no hay hueco). Fuente única para calificar (store) y
+ * mostrar (Study): dos cálculos acabarian divergiendo.
+ */
+export function expectedWord(node: { lemma: string }, sentence?: string): string {
+  if (!sentence) return node.lemma;
+  return blankSentence(sentence, node)?.word ?? node.lemma;
 }
 
 /**

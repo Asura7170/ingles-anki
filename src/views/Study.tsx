@@ -98,6 +98,11 @@ export default function Study() {
 
       <div className="study-body">
         <div className="cloze">
+          {/* El lemma como título, SOLO al revelar: en el anverso la palabra
+              está oculta por diseño (cloze) y mostrarla arruinaría el repaso.
+              La respuesta de abajo es la forma de la frase ("cries"); el
+              título es la unidad enseñada ("cry"). */}
+          {revealed ? <div className="word-title">{node.lemma}</div> : null}
           <CardImage nodeId={node.id!} />
           {hasContext ? (
             <p className="sentence">

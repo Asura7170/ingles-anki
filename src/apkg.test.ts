@@ -286,6 +286,19 @@ describe("importApkg sin worker", () => {
     expect(after2.translations).toContain("música");
     expect(after2.translations).toContain("la música es vida");
   });
+
+  it("primera import de nota todo-ruido: el chip se conserva (dropAll)", async () => {
+    // `mapFields` deja el ruido a propósito antes que "Sin traducción"; la
+    // poda lo borraba en el mismo pase porque no distinguía primera de
+    // re-import (su comentario dice "ruido viejo… de anteriores").
+    await importApkg(
+      asFile(buildNotesApkg("M", [["M_01", "music", "noun", "música"].join("\x1f")])),
+      direct,
+    );
+    const node = (await db.nodes.where("lemma").equals("music").first())!;
+    const sense = (await db.senses.where("nodeId").equals(node.id!).first())!;
+    expect(sense.translations).toEqual(["noun", "música"]);
+  });
 });
 
 describe("contrato del mensaje worker → main", () => {

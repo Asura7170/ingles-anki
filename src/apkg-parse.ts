@@ -244,7 +244,9 @@ function buildCardDeck(q: <T>(sql: string) => T[]): Map<number, number> {
 }
 
 /**
- * Notas de una base candidata, o -1 si no abre (corrupta o no es sqlite).
+ * Notas de una base candidata, o -1 si no abre (corrupta o no es sqlite) o
+ * no trae las tablas que el parseo necesita (`notes` sola no basta: sin
+ * `cards`/`decks`/`col` las queries de después revientan con SQL crudo).
  * Así la elección no depende de nombres: el dummy trae 0–1 y la real N.
  */
 function tryNoteCount(SQL: SqlJsStatic, bytes: Uint8Array): number {
@@ -255,7 +257,15 @@ function tryNoteCount(SQL: SqlJsStatic, bytes: Uint8Array): number {
       const stmt = handle.prepare(`SELECT COUNT(*) AS c FROM notes`);
       const c = stmt.step() ? (stmt.getAsObject() as { c: unknown }).c : -1;
       stmt.free();
-      return typeof c === "number" ? c : -1;
+      if (typeof c !== "number") return -1;
+      const t = handle.prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND (name='cards' OR name='decks' OR name='col')`,
+      );
+      const names = new Set<string>();
+      while (t.step()) names.add((t.getAsObject() as { name: unknown }).name as string);
+      t.free();
+      // `cards` + (`decks` o `col`): lo mínimo que `buildCardDeck`/`readDeckNames` leen.
+      return names.has("cards") && (names.has("decks") || names.has("col")) ? c : -1;
     } finally {
       handle.close();
     }
@@ -267,12 +277,17 @@ function tryNoteCount(SQL: SqlJsStatic, bytes: Uint8Array): number {
 /**
  * El dummy de un .apkg v3: una sola nota con el aviso de actualizar Anki
  * ("…newer version of Anki" en las viejas, "…latest Anki version…" en las
- * nuevas). Un mazo real no contiene "Anki"+"version" en un campo.
+ * nuevas). Se pliegan diacríticos y se usa el stem "vers" para pillar
+ * "versión"/"versão" (el `i` de JS no pliega acentos). Techo conocido: un
+ * mazo real de UNA nota que mencione literalmente "Anki … vers*" se
+ * rechaza igual — distinguirlo pediría el marcador exacto por locale.
+ * // ponytail: falso positivo aceptado, rarísimo en un mazo de vocabulario.
  */
 function isDummyMarker(notes: ApkgNote[]): boolean {
+  const fold = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
   return (
     notes.length <= 1 &&
-    notes.some((n) => n.fields.some((f) => /anki.{0,20}version|version.{0,20}anki/i.test(f)))
+    notes.some((n) => n.fields.some((f) => /anki.{0,20}vers|vers.{0,20}anki/.test(fold(f))))
   );
 }
 

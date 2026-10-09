@@ -512,12 +512,66 @@ describe("el .apkg se parsea", () => {
     expect(() => parse(zipSync(files))).toThrow(/marcador/);
   });
 
+  it("dummy en español (versión con acento): también es marcador", () => {
+    // El regex solo veía "version" ASCII: el dummy ES se importaba como card
+    // basura. Se pliegan diacríticos y se casa el stem "vers".
+    const dummy = new SQL.Database();
+    dummy.run(`CREATE TABLE col (id INTEGER PRIMARY KEY, models TEXT, decks TEXT)`);
+    dummy.run(`INSERT INTO col VALUES (1, '{}', '{}')`);
+    dummy.run(
+      `CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER, ord INTEGER, mod INTEGER, type INTEGER, queue INTEGER, due INTEGER, ivl INTEGER, factor INTEGER, reps INTEGER, lapses INTEGER, left INTEGER, odue INTEGER, odid INTEGER, flags INTEGER, data TEXT)`,
+    );
+    dummy.run(
+      `CREATE TABLE notes (id INTEGER PRIMARY KEY, nid INTEGER, mid INTEGER, mod INTEGER, usn INTEGER, tags TEXT, flds TEXT, sfld INTEGER, csum INTEGER, flags INTEGER, data TEXT)`,
+    );
+    dummy.run(`INSERT INTO notes (id, nid, mid, mod, usn, tags, flds) VALUES (1,1,1,0,0,'',?)`, [
+      ["", "Por favor actualiza a la última versión de Anki e importa el archivo de nuevo."].join(
+        String.fromCharCode(0x1f),
+      ),
+    ]);
+    const dummyBytes = new Uint8Array(dummy.export());
+    dummy.close();
+    expect(() =>
+      parse(zipSync({ "collection.anki2": dummyBytes, media: new TextEncoder().encode("{}") })),
+    ).toThrow(/marcador/);
+  });
+
   it("base única corrupta: error útil, no el crudo de sql.js", () => {
     // El camino mono-candidato saltaba la validación y reventaba en
     // `new SQL.Database` con inglés técnico.
     expect(() => parse(zipSync({ "collection.anki2": new Uint8Array([1, 2, 3]) }))).toThrow(
       /base válida/,
     );
+  });
+
+  it("candidata con notes pero sin cards: pierde aunque tenga más notas", () => {
+    // `tryNoteCount` solo contaba `notes`: una base truncada ganaba por
+    // número y `buildCardDeck` reventaba con "no such table: cards" en el toast.
+    const sep = String.fromCharCode(0x1f);
+    const broken = new SQL.Database();
+    broken.run(`CREATE TABLE col (id INTEGER PRIMARY KEY, models TEXT, decks TEXT)`);
+    broken.run(`INSERT INTO col VALUES (1, '{}', '{}')`);
+    broken.run(
+      `CREATE TABLE notes (id INTEGER PRIMARY KEY, guid TEXT, mid INTEGER, mod INTEGER, usn INTEGER, tags TEXT, flds TEXT, sfld INTEGER, csum INTEGER, flags INTEGER, data TEXT)`,
+    );
+    for (let i = 1; i <= 5; i++) {
+      broken.run(
+        `INSERT INTO notes (id, guid, mid, mod, usn, tags, flds) VALUES (?,'g',1,0,0,'',?)`,
+        [i, `w${i}${sep}tr${i}`],
+      );
+    }
+    const brokenBytes = new Uint8Array(broken.export());
+    broken.close();
+    const sane = unzipSync(buildApkg({ notes: [[1, ["run", "correr"].join(sep), 2]] }));
+    const r = parse(
+      zipSync({
+        "collection.anki2": brokenBytes,
+        "collection.anki21b": sane["collection.anki2"]!,
+        media: new TextEncoder().encode("{}"),
+      }),
+    );
+    expect(r.notes).toHaveLength(1);
+    expect(r.notes[0]!.fields[0]).toBe("run");
   });
 });
 

@@ -114,11 +114,16 @@ async function attachTranslations(nodeId: number, item: IngestItem, sourceKind: 
   // import (`translationSource` de la IA = lo tocó el LLM/usuario y el import
   // no manda sobre ello): podar a ciegas borraba restauraciones como
   // "música" y `collectMissing` ya no las recuperaba (el sentido no queda
-  // vacío). // ponytail: proveniencia por traducción = cambio de schema; hoy
+  // vacío). Lo que ESTA importación trae se respeta (`dropAll` de mapFields
+  // deja chips todo-ruido a propósito antes que "Sin traducción": podarlos
+  // aquí en el mismo pase haría esa decisión letra muerta).
+  // ponytail: proveniencia por traducción = cambio de schema; hoy
   // el sentido entero es la granularidad que hay.
   if (sourceKind === "apkg" && sense.translationSource !== "ai") {
     const headword = item.headword;
+    const fresh = new Set(incoming);
     for (const t of [...set]) {
+      if (fresh.has(t)) continue;
       if (isNoiseTranslation(t, headword) && set.delete(t)) changed = true;
     }
   }

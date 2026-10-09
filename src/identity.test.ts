@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { identify, isFiller, isNoiseTranslation, STOPWORDS, FILLERS } from "./identity";
+import { identify, isFiller, isNoiseTranslation, lemmaOf, STOPWORDS, FILLERS } from "./identity";
 
 /**
  * El motor de identidad. Si un lemma sale mal, el filtro de transcripciones se
@@ -118,6 +118,24 @@ describe("identify — rechazo", () => {
 
   it("conserva una frase que no es sólo muletillas", () => {
     expect(identify("give up")?.kind).toBe("phrase");
+  });
+});
+
+describe("lemmaOf — identify con red de fallback para el .apkg", () => {
+  it("resuelve flexiones y literales que identify rechaza", () => {
+    expect(lemmaOf("likes")).toBe("like");
+    // Stopwords: identify da null pero el import los habilita como vocabulario.
+    expect(lemmaOf("like")).toBe("like");
+    expect(lemmaOf("have")).toBe("have");
+  });
+
+  it("limpia bordes: 'Have!' es 'have', no un lemma aparte", () => {
+    expect(lemmaOf("Have!")).toBe("have");
+  });
+
+  it("lo que no es texto sigue sin lemma", () => {
+    expect(lemmaOf("...")).toBeUndefined();
+    expect(lemmaOf("")).toBeUndefined();
   });
 });
 

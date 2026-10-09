@@ -230,6 +230,16 @@ describe("importApkg sin worker", () => {
     for (const lemma of ["have", "like", "ill"]) {
       expect(await db.nodes.where("lemma").equals(lemma).first()).toBeTruthy();
     }
+    // lemmaOf unificado: "like" encuentra su ejemplo ("likes"→like) y "have"
+    // no se queda como su propia traducción. Antes `identify` a secas dejaba
+    // a los stopwords sin cloze ni ejemplo.
+    const like = (await db.nodes.where("lemma").equals("like").first())!;
+    expect(
+      (await db.examples.where("nodeId").equals(like.id!).toArray()).map((e) => e.text),
+    ).toEqual(["She likes tea."]);
+    const have = (await db.nodes.where("lemma").equals("have").first())!;
+    const haveSense = (await db.senses.where("nodeId").equals(have.id!).first())!;
+    expect(haveSense.translations).toEqual(["to own"]);
   });
 
   it("re-import poda el ruido viejo sin tocar lo legítimo", async () => {
@@ -253,6 +263,28 @@ describe("importApkg sin worker", () => {
     expect(second.result.changed).toBe(1);
     const after = (await db.senses.where("nodeId").equals(node.id!).first())!;
     expect(after.translations).toEqual(["mirar", "to look at something"]);
+  });
+
+  it("re-import no poda lo que restauró el LLM (sentido tocado por la IA)", async () => {
+    // "música" cae como ruido de "music" y solo vuelve vía LLM. El re-import
+    // la podaba del conjunto mezclado y `collectMissing` ya no la recuperaba
+    // (el sentido no queda vacío): pérdida silenciosa en cada re-import.
+    const v1 = ["M_01", "music", "noun", "música", "Music is life."].join("\x1f");
+    await importApkg(asFile(buildNotesApkg("M", [v1])), direct);
+    const node = (await db.nodes.where("lemma").equals("music").first())!;
+    const sense = (await db.senses.where("nodeId").equals(node.id!).first())!;
+    expect(sense.translations).toEqual([]);
+    // El LLM rellena el sentido vacío (así lo deja `mergeTranslations`).
+    await db.senses.update(sense.id!, { translations: ["música"], translationSource: "ai" });
+    // El mazo actualizado trae una traducción legítima nueva: la unión la
+    // añade, pero "música" debe sobrevivir.
+    const v2 = ["M_01", "music", "noun", "música", "la música es vida", "Music is life."].join(
+      "\x1f",
+    );
+    await importApkg(asFile(buildNotesApkg("M", [v2])), direct);
+    const after2 = (await db.senses.where("nodeId").equals(node.id!).first())!;
+    expect(after2.translations).toContain("música");
+    expect(after2.translations).toContain("la música es vida");
   });
 });
 

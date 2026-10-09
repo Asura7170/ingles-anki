@@ -511,6 +511,14 @@ describe("el .apkg se parsea", () => {
     delete files["collection.anki21b"];
     expect(() => parse(zipSync(files))).toThrow(/marcador/);
   });
+
+  it("base única corrupta: error útil, no el crudo de sql.js", () => {
+    // El camino mono-candidato saltaba la validación y reventaba en
+    // `new SQL.Database` con inglés técnico.
+    expect(() => parse(zipSync({ "collection.anki2": new Uint8Array([1, 2, 3]) }))).toThrow(
+      /base válida/,
+    );
+  });
 });
 
 describe("el apkg se comprime y descomprime", () => {

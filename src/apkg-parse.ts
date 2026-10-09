@@ -288,7 +288,11 @@ function isDummyMarker(notes: ApkgNote[]): boolean {
  */
 function findCollection(files: Record<string, Uint8Array>, SQL: SqlJsStatic): string | undefined {
   const present = DB_FILES.filter((k) => k in files);
-  if (present.length <= 1) return present[0];
+  if (present.length === 0) return undefined;
+  // También el candidato único se valida: una base sola y corrupta llegaba
+  // hasta `new SQL.Database` y reventaba con el error crudo en inglés.
+  if (present.length === 1)
+    return tryNoteCount(SQL, files[present[0]!]!) < 0 ? undefined : present[0];
   let best = present[0]!;
   let bestN = -1;
   for (const k of present) {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import { DEFAULT_THRESHOLD, gradeTyping, hasTypingContext } from "./grade";
+import { expectedWord } from "./identity";
 
 /**
  * Anki NO califica la respuesta escrita: el manual lo dice ("does not change how
@@ -27,6 +28,14 @@ describe("gradeTyping", () => {
   it("la forma exacta admite mayúsculas y espacios", () => {
     expect(gradeTyping("cries", "Cries").suggested).toBe(4);
     expect(gradeTyping("cries", "  cries  ").suggested).toBe(4);
+  });
+
+  it("al final de frase, lo correcto da Fácil (sin el punto)", () => {
+    // "I love apples.": lo esperado es "apples" y escribirlo da 4. Con el
+    // punto adherido daba 6/7 → "Difícil" a una respuesta correcta.
+    expect(
+      gradeTyping(expectedWord({ lemma: "apple" }, "I love apples."), "apples").suggested,
+    ).toBe(4);
   });
 
   it("otra palabra sigue saliendo mal", () => {

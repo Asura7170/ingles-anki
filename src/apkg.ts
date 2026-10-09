@@ -1,7 +1,7 @@
 import type { IngestResult } from "./ingest";
 import { ingest, type IngestItem } from "./ingest";
 import { db } from "./db";
-import { identify, fallbackIdentity, isNoiseTranslation } from "./identity";
+import { identify, fallbackIdentity, isNoiseTranslation, lemmaOf } from "./identity";
 import { MAX_IMAGE_BYTES, mimeOf, rootOf, type ApkgNote, type ApkgOut } from "./apkg-format";
 
 let worker: Worker | null = null;
@@ -47,12 +47,12 @@ const isCode = (f: string) =>
 
 /**
  * ¿Menciona el campo a la palabra (en cualquier flexión)? Es el mismo
- * `identify` que usa `blankSentence` para dibujar el hueco: si dice que sí,
+ * `lemmaOf` que usa `blankSentence` para dibujar el hueco: si dice que sí,
  * el hueco existe por construcción.
  */
 function mentionsHeadword(field: string, lemma: string | undefined): boolean {
   if (!lemma) return false;
-  return field.split(/\s+/).some((tok) => identify(tok)?.lemma === lemma);
+  return field.split(/\s+/).some((tok) => lemmaOf(tok) === lemma);
 }
 
 /**
@@ -80,7 +80,7 @@ function mapFields(fields: string[]): {
   // Los códigos no son traducciones en ninguna posición: el ID va primero,
   // pero si aparece en medio tampoco traduce nada.
   const rest = clean.filter((_, i) => i !== start && !isCode(clean[i]!));
-  const lemma = identify(headword)?.lemma;
+  const lemma = lemmaOf(headword);
 
   const longest = (pool: { f: string; i: number }[]): { f: string; i: number } | undefined => {
     let best: { f: string; i: number } | undefined;

@@ -146,6 +146,17 @@ describe("expectedWord", () => {
     expect(expectedWord({ lemma: "cry" }, "He cries when he is sad.")).toBe("cries");
   });
 
+  it("al final de frase: sin el punto (el delimitador no es la palabra)", () => {
+    // "I love apples.": el token es "apples." pero lo esperado es "apples".
+    // Antes la respuesta era "apples." y escribir "apples" daba "Difícil".
+    expect(expectedWord({ lemma: "apple" }, "I love apples.")).toBe("apples");
+    const r = blankSentence("I love apples.", { lemma: "apple" })!;
+    expect(r.word).toBe("apples");
+    // La frase pintada conserva el punto: before + hueco + after es idéntica.
+    expect(r.before + "___" + r.after).toBe("I love ___.");
+    expect(r.before + r.after).toBe("I love .");
+  });
+
   it("sin frase o sin hueco: el lemma", () => {
     expect(expectedWord({ lemma: "cry" }, undefined)).toBe("cry");
     expect(expectedWord({ lemma: "cry" }, "Nothing relevant here.")).toBe("cry");

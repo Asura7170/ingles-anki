@@ -110,11 +110,14 @@ async function attachTranslations(nodeId: number, item: IngestItem, sourceKind: 
   }
   // En re-import apkg, podar el ruido viejo (POS/pronunciación/formas): la
   // unión nunca borra y si no el reverso seguiría mostrando krái/verb de
-  // importaciones anteriores. Solo esas clases caen; lo legítimo (incluido
-  // lo que puso el LLM) se conserva intacto.
-  if (sourceKind === "apkg") {
-    const node = await db.nodes.get(nodeId);
-    const headword = node?.headword ?? "";
+  // importaciones anteriores. Solo si el sentido sigue siendo autoridad del
+  // import (`translationSource` de la IA = lo tocó el LLM/usuario y el import
+  // no manda sobre ello): podar a ciegas borraba restauraciones como
+  // "música" y `collectMissing` ya no las recuperaba (el sentido no queda
+  // vacío). // ponytail: proveniencia por traducción = cambio de schema; hoy
+  // el sentido entero es la granularidad que hay.
+  if (sourceKind === "apkg" && sense.translationSource !== "ai") {
+    const headword = item.headword;
     for (const t of [...set]) {
       if (isNoiseTranslation(t, headword) && set.delete(t)) changed = true;
     }

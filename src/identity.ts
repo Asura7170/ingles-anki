@@ -317,10 +317,23 @@ export function identify(raw: string): Identity | null {
  * ni es texto.
  */
 export function fallbackIdentity(raw: string): Identity | null {
-  const text = raw.trim().toLowerCase().replace(/\s+/g, " ");
+  // Mismos bordes que `clean`: "Have!" es "have", no un lemma aparte que
+  // ningún matching vuelve a encontrar (nodo duplicado e inigualable).
+  const text = clean(raw).replace(/\s+/g, " ");
   if (text.replace(/[^\p{L}]/gu, "").length < 2) return null;
   return { lemma: text, kind: text.includes(" ") ? "phrase" : "word" };
 }
+
+/**
+ * Un solo resolutor de lemma para el mundo .apkg: `identify` primero y
+ * `fallbackIdentity` después. Cuatro caminos (`mentionsHeadword`,
+ * `mapFields`, `isNoiseTranslation`, `blankSentence`) usaban `identify` a
+ * secas y dejaban sordos a los stopwords que el import sí habilita ("like"
+ * perdía su ejemplo y su cloze). `extractCandidates` NO lo usa: en texto
+ * saltar stopwords sigue siendo la intención.
+ */
+export const lemmaOf = (raw: string): string | undefined =>
+  (identify(raw) ?? fallbackIdentity(raw))?.lemma;
 
 /**
  * Etiquetas gramaticales de diccionario. Set cerrado y minúsculas: un campo
@@ -397,16 +410,17 @@ function lev(a: string, b: string): number {
  *
  * Solo cae ASCII si es POS exacto o forma: una traducción normal ("correr",
  * "animal") nunca coincide. Tradeoff documentado: un cognado acentuado
- * ("música"→msk como "music") sí cae; se recupera vía LLM, mientras que el
- * ruido contrario (krái/verb eternos) no se recuperaba de ninguna forma.
+ * ("música"→msk como "music") sí cae; solo vuelve vía LLM si el sentido queda
+ * vacío (`collectMissing` salta sentidos con algo), y un re-import con el
+ * sentido tocado por la IA no lo poda (ver `attachTranslations`).
  */
 export function isNoiseTranslation(field: string, headword: string): boolean {
   const t = field.trim();
   if (!t || /\s/.test(t)) return false;
   if (POS_TAGS.has(t.toLowerCase().replace(/\.$/, ""))) return true;
-  const lemma = (identify(headword) ?? fallbackIdentity(headword))?.lemma;
+  const lemma = lemmaOf(headword);
   if (!lemma) return false;
-  if (identify(t)?.lemma === lemma) return true;
+  if (lemmaOf(t) === lemma) return true;
   if (!/[^\x00-\x7F]/.test(t)) return false;
   const a = skeleton(t);
   const b = skeleton(headword);
@@ -466,8 +480,14 @@ export function extractCandidates(text: string): Candidate[] {
 /**
  * Localiza la palabra dentro de la frase y devuelve las dos mitades para poder
  * dibujar el hueco, MÁS el token original: la respuesta esperada es la forma
- * de la frase ("cries"), no el lemma ("cry"). Usa `identify` para que la
- * flexión coincida (`running` con lemma `run`).
+ * de la frase ("cries"), no el lemma ("cry"). Usa `lemmaOf` para que la
+ * flexión coincida (`running` con lemma `run`) y los stopwords del .apkg
+ * también tengan hueco.
+ *
+ * `word` es el núcleo sin puntuación de bordes ("apples", no "apples."): el
+ * delimitador no es forma de la frase y calificar contra "apples." marcaba
+ * "Difícil" una respuesta correcta. Los bordes se quedan en `before`/`after`
+ * para que la frase pintada no pierda el punto.
  */
 export function blankSentence(
   sentence: string,
@@ -475,14 +495,17 @@ export function blankSentence(
 ): { before: string; word: string; after: string } | null {
   const tokens = sentence.split(/(\s+)/);
   for (let i = 0; i < tokens.length; i++) {
-    const id = identify(tokens[i]!);
-    if (id?.lemma === node.lemma) {
-      return {
-        before: tokens.slice(0, i).join(""),
-        word: tokens[i]!,
-        after: tokens.slice(i + 1).join(""),
-      };
-    }
+    if (lemmaOf(tokens[i]!) !== node.lemma) continue;
+    const tok = tokens[i]!;
+    const lead = /^\P{L}*/u.exec(tok)![0];
+    const tail = /\P{L}*$/u.exec(tok)![0];
+    const word = tok.slice(lead.length, tok.length - tail.length);
+    if (!word) continue;
+    return {
+      before: tokens.slice(0, i).join("") + lead,
+      word,
+      after: tail + tokens.slice(i + 1).join(""),
+    };
   }
   return null;
 }

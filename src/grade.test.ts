@@ -12,21 +12,21 @@ describe("gradeTyping", () => {
     expect(gradeTyping("run", "run").suggested).toBe(4);
   });
 
-  it("flexión válida → acierto: probamos vocabulario, no conjugación", () => {
-    // "He cries when he is sad" pide "cries", pero la respuesta es "cry".
-    // Sin lematizar lo tipado, la forma correcta del contexto salía mal.
-    const r = gradeTyping("cry", "cries");
-    expect(r.comparison.exact).toBe(true);
-    expect(r.suggested).toBe(4);
-    // El reverso muestra lo tipado ("cries") en verde, no el lemma: pintar
-    // "cry" parecía que te cambiaba la respuesta.
-    expect(r.comparison.typedLine.map((t) => t.text).join("")).toBe("cries");
-    expect(r.comparison.typedLine.every((t) => t.kind === "good")).toBe(true);
+  it("solo vale la forma exacta del contexto, no el infinitivo", () => {
+    // "He cries…": la respuesta es "cries". Escribir "cry" da "cr" en verde
+    // y la "y" en rojo: cerca, pero no es lo que la frase pide.
+    expect(gradeTyping("cries", "cries").suggested).toBe(4);
+    const r = gradeTyping("cries", "cry");
+    expect(r.comparison.exact).toBe(false);
+    expect(r.suggested).toBe(1);
+    expect(r.comparison.typedLine.map((t) => `${t.kind}:${t.text}`).join("|")).toBe(
+      "good:cr|bad:y",
+    );
   });
 
-  it("la flexión admite mayúsculas y espacios", () => {
-    expect(gradeTyping("cry", "Cries").suggested).toBe(4);
-    expect(gradeTyping("cry", "  cries  ").suggested).toBe(4);
+  it("la forma exacta admite mayúsculas y espacios", () => {
+    expect(gradeTyping("cries", "Cries").suggested).toBe(4);
+    expect(gradeTyping("cries", "  cries  ").suggested).toBe(4);
   });
 
   it("otra palabra sigue saliendo mal", () => {

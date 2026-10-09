@@ -188,7 +188,8 @@ describe("el diff de lo que escribiste", () => {
   it("respuesta correcta: todo verde y sin botón de reintentar", async () => {
     await mount([makeItem()]);
     const input = screen.getByLabelText("Escribe la palabra en inglés");
-    fireEvent.change(input, { target: { value: "startle" } });
+    // La forma de la frase ("startled"), no el lemma: solo vale la exacta.
+    fireEvent.change(input, { target: { value: "startled" } });
     fireEvent.click(screen.getByRole("button", { name: /Mostrar reverso/ }));
 
     await waitFor(() => expect(useApp.getState().revealed).toBe(true));
@@ -269,8 +270,8 @@ describe("la barra de grados cambia al revelar", () => {
   it("revelada: cuatro botones con su tecla y sólo uno sugerido", async () => {
     await mount([makeItem()]);
     const input = screen.getByLabelText("Escribe la palabra en inglés");
-    // Exacto a propósito: la sugerencia por coincidencia debe ser "Fácil".
-    fireEvent.change(input, { target: { value: "startle" } });
+    // Exacto a propósito (la forma de la frase): la sugerencia debe ser "Fácil".
+    fireEvent.change(input, { target: { value: "startled" } });
     fireEvent.click(screen.getByRole("button", { name: /Mostrar reverso/ }));
     await waitFor(() => expect(useApp.getState().revealed).toBe(true));
 

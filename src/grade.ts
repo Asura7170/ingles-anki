@@ -1,6 +1,5 @@
 import type { Ease } from "./db";
-import { compareAnswer, normalizeForDiff, type Comparison } from "./diff";
-import { identify } from "./identity";
+import { compareAnswer, type Comparison } from "./diff";
 
 /**
  * Anki NO califica la respuesta escrita: el manual lo dice ("does not change how
@@ -27,27 +26,10 @@ export function gradeTyping(
 ): GradeResult {
   if (!typed.trim()) return { comparison: compareAnswer(expected, ""), suggested: null };
 
-  // La forma flexiona al mismo lemma ("cries"→"cry"): acierto. El display
-  // muestra LO TIPADO en verde, no el lemma: pintar "cry" cuando escribiste
-  // "cries" parecía que te cambiaba la respuesta. Probamos vocabulario, no
-  // conjugación; cualquier otra entrada sigue el camino de siempre.
-  const expectedLemma = identify(expected)?.lemma;
-  if (expectedLemma && identify(typed)?.lemma === expectedLemma) {
-    const normTyped = normalizeForDiff(typed);
-    return {
-      comparison: {
-        exact: true,
-        typedLine: [{ kind: "good", text: normTyped }],
-        expectedLine: [{ kind: "good", text: normalizeForDiff(expected) }],
-        ok: normTyped.length,
-        bad: 0,
-        missing: 0,
-        ratio: 1,
-      },
-      suggested: 4,
-    };
-  }
-
+  // Sin atajos por lemma: vale la forma exacta del contexto ("cries"), no el
+  // infinitivo ("cry" da "cr" verde + "y" roja). La respuesta esperada ya es
+  // la palabra de la frase (store la calcula), así que aquí no hay nada que
+  // perdonar.
   const comparison = compareAnswer(expected, typed);
   let suggested: Ease;
 
